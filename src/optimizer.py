@@ -38,12 +38,24 @@ TIER_ORDER = ["Beginner", "Intermediate", "Advanced", "Master"]
 
 # Role archetypes as stat-weight profiles. Weights are relative importance,
 # not required to sum to 1 - only relative magnitude matters for scoring.
+#
+# Note on "Speed/Precision" (previously named "Flier/Mobility"): Movement
+# (Mov) isn't a growth stat - it's purely a class trait, not something a
+# character has an innate growth rate for. That means natural role
+# DETECTION (which only has growth rates to work with) can't actually tell
+# whether a character has any flying affinity; a Mov weight there would
+# silently contribute nothing. What the growth data CAN show is a Dex/Spd
+# lean, which is better described honestly as speed/precision. Mov still
+# matters when scoring CLASSES for this role (see score_class_for_role) -
+# a real class does have a Mov stat - so a Speed/Precision character can
+# still get steered toward flying classes if those score best, just without
+# the role's name overclaiming what growth-rate data alone can detect.
 ROLE_PROFILES = {
     "Physical Attacker": {"Str": 1.0, "Spd": 0.5},
     "Magic Attacker": {"Mag": 1.0, "Dex": 0.3},
     "Tank": {"HP": 1.0, "Def": 1.0},
-    "Support": {"Res": 0.7, "Cha": 0.7, "Mag": 0.3},
-    "Flier/Mobility": {"Spd": 0.7, "Dex": 0.3, "Mov": 1.0},
+    "Support": {"Res": 0.7, "Cha": 0.7},
+    "Speed/Precision": {"Spd": 0.7, "Dex": 0.3, "Mov": 1.0},
 }
 
 
@@ -59,13 +71,46 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / denom)
 
 
-def detect_natural_role(growth_row: pd.Series) -> tuple[str, float]:
+def compute_roster_stat_stats(growth_rates_df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
+    """
+    Mean and standard deviation of each growth-rate stat across the roster.
+    Used to standardize (z-score) a character's growth rates before role
+    detection - see detect_natural_role for why this matters.
+    """
+    means = growth_rates_df[STAT_COLS].mean()
+    stds = growth_rates_df[STAT_COLS].std().replace(0, 1)  # guard divide-by-zero
+    return means, stds
+
+
+def detect_natural_role(
+    growth_row: pd.Series,
+    roster_means: pd.Series | None = None,
+    roster_stds: pd.Series | None = None,
+) -> tuple[str, float]:
     """
     Given a character's growth-rate row, find which role archetype their
-    growth rates most resemble (cosine similarity between the character's
-    growth vector and each role's weight vector). Returns (role_name, score).
+    growth rates most resemble.
+
+    Growth rates are standardized (z-scored) against the roster before
+    comparing, rather than compared as raw percentages. This matters because
+    raw-percentage cosine similarity compares vector SHAPE across all 9
+    stats at once, which under-weights a character's genuinely distinctive
+    stat (e.g. unusually high Magic growth) if it happens to sit alongside
+    moderately-high values in other stats shared with a different role's
+    profile (e.g. Resistance, which Support also cares about) - two
+    characters caught by this in testing, Hubert and Linhardt, were
+    classified as Support instead of Magic Attacker before this fix, despite
+    both being mage archetypes. Standardizing first measures "how unusual is
+    this stat for this character, relative to everyone else" instead of raw
+    magnitude, which better isolates each character's actual specialty.
+
+    If roster_means/roster_stds aren't provided, falls back to raw growth
+    rates (no standardization) - useful for one-off testing.
     """
-    growth_vector = growth_row[STAT_COLS].to_numpy(dtype=float)
+    if roster_means is not None and roster_stds is not None:
+        growth_vector = ((growth_row[STAT_COLS] - roster_means) / roster_stds).to_numpy(dtype=float)
+    else:
+        growth_vector = growth_row[STAT_COLS].to_numpy(dtype=float)
 
     best_role, best_score = None, -1.0
     for role_name, weights in ROLE_PROFILES.items():
@@ -102,6 +147,17 @@ def recommend_path(
 
     for tier in tiers:
         tier_classes = stat_boosts_df[stat_boosts_df["tier"] == tier]
+
+        # Exclude story/enemy-specific variant rows (e.g. "Lord (Judith)",
+        # "Fortress Knight (Chapter 5 Gilbert)") - these are one-off NPC/boss
+        # instances Serenes Forest documents alongside real playable classes,
+        # not classes a player can actually select. They tend to have unusually
+        # high stats and can otherwise out-score every legitimate option
+        # regardless of role, which would make them get recommended for
+        # basically everyone - a real bug caught by inspecting team-building
+        # output, where the same variant kept appearing across every role.
+        tier_classes = tier_classes[~tier_classes["name"].str.contains(r"\(", regex=True)]
+
         if tier_classes.empty:
             continue
 
@@ -164,7 +220,8 @@ def recommend_for_character(
     base_row = base_stats_df[base_stats_df["name"] == character_name].iloc[0]
     growth_row = growth_rates_df[growth_rates_df["name"] == character_name].iloc[0]
 
-    detected_role, detection_score = detect_natural_role(growth_row)
+    roster_means, roster_stds = compute_roster_stat_stats(growth_rates_df)
+    detected_role, detection_score = detect_natural_role(growth_row, roster_means, roster_stds)
     used_role = role_name or detected_role
 
     path = recommend_path(stat_boosts_df, used_role)

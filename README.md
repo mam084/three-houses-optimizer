@@ -9,7 +9,7 @@ Built as a portfolio project. Started as a Pokemon competitive team-builder; piv
 ## Features
 
 - Scrapes character base stats, growth rates, and class stat boosts directly from [Serenes Forest](https://serenesforest.net/three-houses/)
-- **Auto-detected role** - infers what a character is naturally good at from their growth rates (cosine similarity against 5 role archetypes: Physical Attacker, Magic Attacker, Tank, Support, Flier/Mobility), no input needed
+- **Auto-detected role** - infers what a character is naturally good at from their growth rates, standardized against the roster and compared via cosine similarity against 5 role archetypes: Physical Attacker, Magic Attacker, Tank, Support, Speed/Precision - no input needed
 - **Manual role targeting** - override the auto-detection to ask "what if I built this character as a mage instead?"
 - **Class path recommendation** - best-fitting class at each tier (Beginner -> Intermediate -> Advanced -> Master) toward the target role
 - **Stat projection** - expected stats at a chosen level, shown as a before/after radar chart against the character's Level 1 base stats
@@ -48,10 +48,14 @@ python src/scrape_serenes.py
 streamlit run app.py
 ```
 
-You can also use the recommender from the command line directly:
+You can also use the recommender from the command line directly. Run these
+as modules (`-m`) from the project root, not as direct file paths - some
+scripts import from others, and `-m` mode resolves those imports correctly:
 ```bash
-python src/optimizer.py Bernadetta
-python src/optimizer.py Dedue --role "Magic Attacker" --level 30
+python -m src.optimizer Bernadetta
+python -m src.optimizer Dedue --role "Magic Attacker" --level 30
+python -m src.team_builder --house "Black Eagles" --size 6
+python -m src.team_builder --size 8
 ```
 
 ## Project Structure
@@ -66,7 +70,8 @@ three-houses-optimizer/
 │   └── screenshot.png
 ├── src/
 │   ├── scrape_serenes.py
-│   └── optimizer.py
+│   ├── optimizer.py
+│   └── team_builder.py
 ├── app.py
 ├── requirements.txt
 ├── .gitignore
@@ -76,6 +81,7 @@ three-houses-optimizer/
 **`src/`**
 - `scrape_serenes.py` - pulls character and class data from Serenes Forest, with manual BeautifulSoup row parsing (not `pandas.read_html()`) to correctly handle the site's spoiler-toggle rows
 - `optimizer.py` - the recommendation logic: role detection, class path selection, stat projection
+- `team_builder.py` - builds a balanced team from a candidate pool via round-robin selection across auto-detected roles
 
 **`app.py`** - the Streamlit dashboard.
 
@@ -84,10 +90,9 @@ three-houses-optimizer/
 - [x] **Data pipeline:** scrape character stats, growth rates, and class stat boosts
 - [x] **v1 recommender:** auto-detected or manually-targeted role, class path recommendation, stat projection
 - [x] **Dashboard:** interactive character/role/level picker with path and radar chart *(this release)*
-- [ ] **Team composition layer:** recommend a full squad covering complementary roles, not just one character at a time
+- [x] **Team composition layer:** recommend a full squad covering complementary roles, not just one character at a time *(this release)*
 - [ ] **Skill requirement data:** replace the tier-order approximation with the game's real level + skill-proficiency unlock conditions
 - [ ] **Unique-class eligibility:** properly model which lord classes are available to which characters
-- [ ] **Deploy:** ship as a public web app (Streamlit Community Cloud)
 
 ## Data Source
 
