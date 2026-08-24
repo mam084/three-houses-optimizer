@@ -30,20 +30,27 @@ st.set_page_config(page_title="Three Houses Class Optimizer", page_icon="⚔️"
 
 
 @st.cache_data
-def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    required = ["character_base_stats.csv", "character_growth_rates.csv", "class_stat_boosts.csv"]
+def load_data() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    required = [
+        "character_base_stats.csv", "character_growth_rates.csv", "class_stat_boosts.csv",
+        "class_eligibility.csv", "character_gender.csv",
+    ]
     missing = [f for f in required if not (DATA_DIR / f).exists()]
     if missing:
         st.error(
             f"Missing data file(s): {', '.join(missing)}. "
-            f"Run `python src/scrape_serenes.py` first."
+            f"Base stats/growth rates/stat boosts come from `python src/scrape_serenes.py`; "
+            f"class_eligibility.csv and character_gender.csv are hand-maintained and checked "
+            f"into the repo directly (Serenes doesn't have this data in scrapable form)."
         )
         st.stop()
 
     base_stats_df = pd.read_csv(DATA_DIR / "character_base_stats.csv")
     growth_rates_df = pd.read_csv(DATA_DIR / "character_growth_rates.csv")
     stat_boosts_df = pd.read_csv(DATA_DIR / "class_stat_boosts.csv")
-    return base_stats_df, growth_rates_df, stat_boosts_df
+    eligibility_df = pd.read_csv(DATA_DIR / "class_eligibility.csv")
+    character_gender_df = pd.read_csv(DATA_DIR / "character_gender.csv")
+    return base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df
 
 
 def get_playable_names(base_stats_df: pd.DataFrame) -> list[str]:
@@ -108,10 +115,11 @@ def render_team(team: list[dict]):
                 st.write(path_str)
 
 
-def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, playable_names):
+def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df, playable_names):
     st.caption(
         "Pick a character and see a recommended class path - either toward their "
-        "natural strengths, or a role you choose."
+        "natural strengths, or a role you choose. Only classes that character can "
+        "actually access (character/gender-locked classes included) are considered."
     )
 
     col1, col2, col3 = st.columns([2, 2, 1])
@@ -131,6 +139,7 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, playabl
     result = recommend_for_character(
         character, base_stats_df, growth_rates_df, stat_boosts_df,
         role_name=role_name, target_level=target_level,
+        eligibility_df=eligibility_df, character_gender_df=character_gender_df,
     )
 
     if role_name is None:
@@ -151,7 +160,7 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, playabl
     render_stat_radar(base_row, result["expected_final_stats"], character, final_class)
 
 
-def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, playable_names):
+def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df, playable_names):
     st.caption(
         "Builds a balanced team from a candidate pool by covering complementary "
         "roles, rather than just stacking the strongest individuals."
@@ -176,6 +185,7 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, playable_nam
         team = build_team_with_paths(
             candidates, base_stats_df, growth_rates_df, stat_boosts_df,
             team_size=team_size, target_level=target_level,
+            eligibility_df=eligibility_df, character_gender_df=character_gender_df,
         )
         if not team:
             st.warning("Couldn't build a team from this pool - try a larger candidate pool.")
@@ -186,16 +196,16 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, playable_nam
 
 
 def main():
-    base_stats_df, growth_rates_df, stat_boosts_df = load_data()
+    base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df = load_data()
     playable_names = get_playable_names(base_stats_df)
 
     st.title("⚔️ Three Houses Class Optimizer")
 
     tab1, tab2 = st.tabs(["Character Optimizer", "Team Builder"])
     with tab1:
-        render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, playable_names)
+        render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df, playable_names)
     with tab2:
-        render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, playable_names)
+        render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df, playable_names)
 
 
 if __name__ == "__main__":

@@ -118,11 +118,18 @@ def build_team_with_paths(
     stat_boosts_df: pd.DataFrame,
     team_size: int = 6,
     target_level: int = 20,
+    eligibility_df: pd.DataFrame | None = None,
+    character_gender_df: pd.DataFrame | None = None,
 ) -> list[dict]:
     """
     Like build_balanced_team, but also attaches each member's full class-path
     recommendation (reusing optimizer.recommend_for_character), so the team
     output is immediately useful rather than just a role assignment.
+
+    eligibility_df and character_gender_df are passed straight through to
+    recommend_for_character - see its docstring. Both optional and default
+    to None (no eligibility filtering), for backward compatibility with
+    existing callers.
     """
     team = build_balanced_team(candidates, growth_rates_df, team_size)
 
@@ -130,10 +137,12 @@ def build_team_with_paths(
         full_rec = recommend_for_character(
             member["character"], base_stats_df, growth_rates_df, stat_boosts_df,
             role_name=member["role"], target_level=target_level,
+            eligibility_df=eligibility_df, character_gender_df=character_gender_df,
         )
         member["path"] = full_rec["path"]
         member["final_class"] = full_rec["path"][-1]["class"] if full_rec["path"] else None
         member["expected_final_stats"] = full_rec["expected_final_stats"]
+        member["eligible_unique_classes"] = full_rec["eligible_unique_classes"]
 
     return team
 
@@ -142,6 +151,8 @@ def main():
     base_stats_df = pd.read_csv(DATA_DIR / "character_base_stats.csv")
     growth_rates_df = pd.read_csv(DATA_DIR / "character_growth_rates.csv")
     stat_boosts_df = pd.read_csv(DATA_DIR / "class_stat_boosts.csv")
+    eligibility_df = pd.read_csv(DATA_DIR / "class_eligibility.csv")
+    character_gender_df = pd.read_csv(DATA_DIR / "character_gender.csv")
 
     import argparse
     parser = argparse.ArgumentParser(description="Recommend a balanced Three Houses team.")
@@ -155,7 +166,10 @@ def main():
     else:
         candidates = base_stats_df[~base_stats_df["name"].str.contains(r"\(NPC\)")]["name"].tolist()
 
-    team = build_team_with_paths(candidates, base_stats_df, growth_rates_df, stat_boosts_df, team_size=args.size)
+    team = build_team_with_paths(
+        candidates, base_stats_df, growth_rates_df, stat_boosts_df, team_size=args.size,
+        eligibility_df=eligibility_df, character_gender_df=character_gender_df,
+    )
 
     print(f"\nRecommended team ({len(team)}/{args.size}):\n")
     for member in team:

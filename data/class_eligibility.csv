@@ -1,0 +1,23 @@
+class_name,locked_to_characters,locked_to_gender,unlock_note
+Brawler,,Male,
+Dark Mage,,Male,Also requires prior Mage certification
+Pegasus Knight,,Female,
+Hero,,Male,
+Grappler,,Male,
+Dark Bishop,,Male,Requires prior Dark Mage certification
+Falcon Knight,,Female,
+War Master,,Male,
+Gremory,,Female,
+Dark Flier,,Female,DLC Exclusive
+Valkyrie,,Female,DLC Exclusive
+Lord,Edelgard|Dimitri|Claude,,House-leader class -- unlocked via story progression rather than a certification exam
+Noble,,,Starting class for characters of noble birth -- not selectable via certification
+Commoner,,,Starting class for characters of common birth -- not selectable via certification
+Dancer,,,Open to any student character (excludes the Protagonist and NPCs) -- unlocked via the White Heron Cup event rather than a certification exam; only one character can hold it per playthrough (not modeled here)
+Enlightened One,Protagonist,,Byleth's unique Master-tier class -- unlocked via story progression
+Armored Lord,Edelgard,,Edelgard's unique Advanced-tier class -- unlocked via story progression
+High Lord,Dimitri,,Dimitri's unique Advanced-tier class -- unlocked via story progression
+Wyvern Master,Claude,,Claude's unique Advanced-tier class -- unlocked via story progression
+Emperor,Edelgard,,Edelgard's unique Master-tier class -- upgrade of Armored Lord; unlocked via story progression
+Great Lord,Dimitri,,Dimitri's unique Master-tier class -- upgrade of High Lord; unlocked via story progression
+Barbarossa,Claude,,Claude's unique Master-tier class -- upgrade of Wyvern Master; unlocked via story progression
