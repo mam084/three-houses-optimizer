@@ -1,0 +1,44 @@
+name,HP,Str,Mag,Dex,Spd,Lck,Def,Res,Cha,house
+Protagonist,45,45,35,45,45,45,35,30,45,You and the Enigmatic Girl
+Sothis (NPC),35,30,65,40,40,65,30,60,70,You and the Enigmatic Girl
+Edelgard,40,55,45,45,40,30,35,35,60,Black Eagles
+Hubert,35,30,55,45,45,35,25,40,35,Black Eagles
+Dorothea,40,20,40,45,40,35,15,35,40,Black Eagles
+Ferdinand,50,45,20,40,50,40,35,20,40,Black Eagles
+Bernadetta,35,35,20,55,50,25,20,30,35,Black Eagles
+Caspar,55,45,25,45,45,40,30,20,25,Black Eagles
+Petra,45,40,25,50,60,45,30,15,35,Black Eagles
+Linhardt,30,30,45,40,40,45,30,45,20,Black Eagles
+Dimitri,55,60,20,50,50,25,40,20,55,Blue Lions
+Dedue,60,50,15,30,20,25,50,10,30,Blue Lions
+Felix,45,55,30,45,55,40,30,20,30,Blue Lions
+Mercedes,30,25,50,45,40,30,25,45,40,Blue Lions
+Ashe,35,35,25,55,50,40,20,35,25,Blue Lions
+Annette,25,30,50,50,35,35,20,30,35,Blue Lions
+Sylvain,55,45,30,35,50,35,40,25,40,Blue Lions
+Ingrid,40,35,35,40,60,45,30,40,45,Blue Lions
+Claude,35,40,25,60,55,45,30,25,55,Golden Deer
+Lorenz,55,40,40,45,40,25,30,40,35,Golden Deer
+Hilda,50,45,25,30,50,35,35,20,50,Golden Deer
+Raphael,65,50,15,35,15,35,45,10,25,Golden Deer
+Lysithea,20,15,60,60,50,15,10,25,25,Golden Deer
+Ignatz,35,35,30,50,50,55,25,35,25,Golden Deer
+Marianne,35,20,50,40,40,35,15,45,40,Golden Deer
+Leonie,40,40,20,55,60,40,40,15,40,Golden Deer
+Rhea (NPC),45,35,45,40,40,40,30,40,70,Church of Seiros
+Manuela,50,35,35,40,60,35,30,25,50,Church of Seiros
+Hanneman,40,30,55,45,20,35,25,40,35,Church of Seiros
+Seteth,50,45,35,50,50,25,30,25,45,Church of Seiros
+Flayn,25,25,55,45,35,15,25,50,45,Church of Seiros
+Cyril,35,20,15,40,40,30,10,10,15,Church of Seiros
+Jeralt (NPC),50,45,20,45,40,25,35,35,35,Knights of Seiros
+Catherine,50,50,25,40,55,30,30,20,25,Knights of Seiros
+Alois,45,45,20,35,40,30,40,20,40,Knights of Seiros
+Gilbert,55,45,20,45,30,15,45,10,35,Knights of Seiros
+Shamir,35,40,20,55,40,55,20,15,30,Knights of Seiros
+Yuri,30,40,35,40,65,45,30,35,50,DLC Exclusive
+Balthus,50,50,30,25,30,20,45,30,30,DLC Exclusive
+Constance,20,20,60,30,35,15,15,30,25,DLC Exclusive
+Hapi,35,35,45,45,40,20,15,45,25,DLC Exclusive
+Jeritza,50,50,35,35,60,30,40,25,25,DLC Exclusive
+Anna,35,35,35,45,55,45,30,40,50,DLC Exclusive

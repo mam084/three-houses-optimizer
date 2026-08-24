@@ -1,0 +1,44 @@
+name,HP,Str,Mag,Dex,Spd,Lck,Def,Res,Cha,house
+Protagonist,27,13,6,9,8,8,6,6,7,You and the Enigmatic Girl
+Sothis (NPC),26,6,12,6,6,8,6,10,10,You and the Enigmatic Girl
+Edelgard,29,13,6,5,8,5,6,4,10,Black Eagles
+Hubert,22,6,12,6,7,6,4,7,6,Black Eagles
+Dorothea,24,5,11,6,7,6,4,7,8,Black Eagles
+Ferdinand,28,8,5,6,8,6,6,2,7,Black Eagles
+Bernadetta,25,8,5,7,7,5,4,2,6,Black Eagles
+Caspar,26,9,3,5,6,8,6,2,4,Black Eagles
+Petra,25,9,3,7,10,7,5,2,6,Black Eagles
+Linhardt,24,5,10,6,5,7,5,9,3,Black Eagles
+Dimitri,28,12,4,7,7,5,7,4,9,Blue Lions
+Dedue,30,12,2,5,7,5,8,1,4,Blue Lions
+Felix,26,10,5,6,9,5,5,3,5,Blue Lions
+Mercedes,25,6,10,6,8,5,5,9,8,Blue Lions
+Ashe,23,8,5,8,9,6,5,6,5,Blue Lions
+Annette,23,6,11,7,7,6,5,4,6,Blue Lions
+Sylvain,27,9,5,5,8,6,6,2,7,Blue Lions
+Ingrid,27,8,6,6,8,6,5,8,8,Blue Lions
+Claude,26,11,5,8,8,7,6,4,8,Golden Deer
+Lorenz,28,8,7,6,7,5,6,6,3,Golden Deer
+Hilda,29,10,5,5,8,6,6,3,7,Golden Deer
+Raphael,30,11,3,5,6,6,7,1,4,Golden Deer
+Lysithea,22,4,11,7,7,4,3,4,5,Golden Deer
+Ignatz,25,8,5,7,8,8,4,6,4,Golden Deer
+Marianne,23,5,11,6,7,6,4,8,7,Golden Deer
+Leonie,26,9,5,8,9,6,7,2,7,Golden Deer
+Rhea (NPC),28,9,9,6,6,6,6,10,10,Church of Seiros
+Manuela,26,10,8,6,8,6,5,4,7,Church of Seiros
+Hanneman,25,6,10,6,6,4,5,7,5,Church of Seiros
+Seteth,27,9,8,8,5,6,6,4,9,Church of Seiros
+Flayn,24,6,9,6,5,4,5,10,9,Church of Seiros
+Cyril,24,7,4,6,6,6,5,2,4,Church of Seiros
+Jeralt (NPC),29,8,4,6,4,5,6,5,6,Knights of Seiros
+Catherine,27,8,5,6,7,6,5,2,4,Knights of Seiros
+Alois,28,9,4,5,6,5,5,2,7,Knights of Seiros
+Gilbert,30,9,4,6,5,4,5,2,6,Knights of Seiros
+Shamir,26,8,4,7,6,8,5,2,6,Knights of Seiros
+Yuri,24,10,6,7,9,7,5,7,8,DLC-exclusive
+Balthus,28,11,5,4,7,3,7,4,4,DLC-exclusive
+Constance,23,5,11,6,6,4,3,4,6,DLC-exclusive
+Hapi,26,6,11,8,6,4,4,7,4,DLC-exclusive
+Jeritza,30,8,6,6,8,4,7,5,3,DLC-exclusive
+Anna,26,7,7,7,7,7,5,7,7,DLC-exclusive
