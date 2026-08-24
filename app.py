@@ -12,6 +12,7 @@ Run with:
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -22,9 +23,10 @@ from src.optimizer import (
     TIER_ORDER,
     recommend_for_character,
 )
-from src.team_builder import build_team_with_paths
+from src.team_builder import DLC_HOUSE, REAL_ROUTES, build_team_with_paths, get_candidate_pool
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
+PORTRAIT_DIR = Path(__file__).resolve().parent / "assets" / "portraits"
 
 st.set_page_config(page_title="Three Houses Class Optimizer", page_icon="⚔️", layout="wide")
 
@@ -58,6 +60,47 @@ def get_playable_names(base_stats_df: pd.DataFrame) -> list[str]:
     return sorted(n for n in base_stats_df["name"] if "(NPC)" not in n)
 
 
+def get_dlc_names(base_stats_df: pd.DataFrame) -> set[str]:
+    """Characters that require the Cindered Shadows DLC - flagged in the UI, never silently mixed in."""
+    return set(base_stats_df[base_stats_df["house"] == DLC_HOUSE]["name"])
+
+
+def display_name(name: str, dlc_names: set[str]) -> str:
+    """Character label for dropdowns/rosters - tags DLC characters instead of listing them indistinguishably."""
+    return f"{name} (DLC)" if name in dlc_names else name
+
+
+def get_portrait_path(character_name: str) -> Path | None:
+    """
+    Look up a local portrait image for a character, if one has been placed
+    in assets/portraits/ (see that folder's README - actual character art
+    isn't shipped in this repo, since Three Houses portraits are Nintendo/
+    Intelligent Systems IP and not this project's to redistribute; add your
+    own from a source you have the rights to use).
+    """
+    if not PORTRAIT_DIR.exists():
+        return None
+    slug = character_name.lower().replace(" ", "_").replace("(", "").replace(")", "")
+    for ext in (".png", ".jpg", ".jpeg", ".webp"):
+        candidate = PORTRAIT_DIR / f"{slug}{ext}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def render_portrait(character_name: str, width: int = 96):
+    portrait = get_portrait_path(character_name)
+    if portrait:
+        st.image(str(portrait), width=width)
+    else:
+        st.markdown(
+            f"<div style='width:{width}px;height:{width}px;border-radius:8px;background:#2b2b3a;"
+            f"display:flex;align-items:center;justify-content:center;font-size:{width//3}px;'>"
+            f"{character_name[0]}</div>",
+            unsafe_allow_html=True,
+        )
+
+
 def render_path(path: list[dict]):
     st.subheader("Recommended Class Path")
     cols = st.columns(len(path))
@@ -65,6 +108,7 @@ def render_path(path: list[dict]):
         with col:
             st.metric(label=step["tier"], value=step["class"])
             st.caption(f"fit score {step['score']}")
+            st.caption(step["why"])
 
 
 def render_stat_radar(base_row: pd.Series, final_stats: dict, character: str, final_class: str):
@@ -98,7 +142,7 @@ def render_stat_radar(base_row: pd.Series, final_stats: dict, character: str, fi
     )
 
 
-def render_team(team: list[dict]):
+def render_team(team: list[dict], dlc_names: set[str]):
     st.subheader(f"Recommended Team ({len(team)})")
 
     role_counts = pd.Series([m["role"] for m in team]).value_counts()
@@ -107,15 +151,18 @@ def render_team(team: list[dict]):
     for member in team:
         path_str = " → ".join(step["class"] for step in member["path"])
         with st.container(border=True):
-            col1, col2 = st.columns([1, 3])
+            col1, col2, col3 = st.columns([1, 1, 3])
             with col1:
-                st.markdown(f"**{member['character']}**")
-                st.caption(f"{member['role']} (score {member['score']})")
+                render_portrait(member["character"])
             with col2:
+                st.markdown(f"**{display_name(member['character'], dlc_names)}**")
+                st.caption(f"{member['role']} (score {member['score']})")
+            with col3:
                 st.write(path_str)
+                st.caption(f"Why on the team: {member['why']}")
 
 
-def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df, playable_names):
+def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df, playable_names, dlc_names):
     st.caption(
         "Pick a character and see a recommended class path - either toward their "
         "natural strengths, or a role you choose. Only classes that character can "
@@ -124,7 +171,10 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
 
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
-        character = st.selectbox("Character", options=playable_names, key="char_select")
+        character = st.selectbox(
+            "Character", options=playable_names, key="char_select",
+            format_func=lambda name: display_name(name, dlc_names),
+        )
     with col2:
         role_choice = st.selectbox(
             "Target role",
@@ -142,11 +192,20 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
         eligibility_df=eligibility_df, character_gender_df=character_gender_df,
     )
 
-    if role_name is None:
-        st.info(
-            f"Auto-detected natural role: **{result['auto_detected_role']}** "
-            f"(similarity {result['auto_detection_score']})"
-        )
+    col_portrait, col_info = st.columns([1, 5])
+    with col_portrait:
+        render_portrait(character, width=80)
+    with col_info:
+        if role_name is None:
+            st.info(
+                f"Auto-detected natural role: **{result['auto_detected_role']}** "
+                f"(similarity {result['auto_detection_score']})"
+            )
+        else:
+            st.caption(
+                f"Their own natural role auto-detects as **{result['auto_detected_role']}** "
+                f"(similarity {result['auto_detection_score']}) - you're targeting **{role_name}** instead."
+            )
 
     if not result["path"]:
         st.warning("No class path could be built - check that class_stat_boosts.csv has data for all tiers.")
@@ -160,52 +219,90 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
     render_stat_radar(base_row, result["expected_final_stats"], character, final_class)
 
 
-def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df, playable_names):
+def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df, playable_names, dlc_names):
     st.caption(
         "Builds a balanced team from a candidate pool by covering complementary "
         "roles, rather than just stacking the strongest individuals."
     )
 
-    houses = sorted(base_stats_df[base_stats_df["name"].isin(playable_names)]["house"].unique())
-
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
-        pool_choice = st.selectbox("Candidate pool", options=["Full roster"] + houses, key="team_pool")
+        route_choice = st.selectbox(
+            "Route", options=["Full roster"] + REAL_ROUTES, key="team_route",
+            help="A route includes that house's students plus the Protagonist and the Church/Knights of "
+                 "Seiros staff, who are recruitable on any route.",
+        )
     with col2:
         team_size = st.slider("Team size", min_value=3, max_value=12, value=6, key="team_size")
     with col3:
         target_level = st.slider("Target level", min_value=5, max_value=40, value=20, key="team_level")
 
-    if pool_choice == "Full roster":
-        candidates = playable_names
-    else:
-        candidates = base_stats_df[base_stats_df["house"] == pool_choice]["name"].tolist()
+    include_dlc = st.checkbox(
+        "Include DLC characters (Cindered Shadows)", value=False, key="team_include_dlc",
+    )
 
-    if st.button("Build Team", type="primary"):
+    candidates = get_candidate_pool(
+        base_stats_df, playable_names, route=None if route_choice == "Full roster" else route_choice,
+        include_dlc=include_dlc,
+    )
+
+    with st.expander("Looking for something specific? (optional)"):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            must_include = st.multiselect(
+                "Must include", options=sorted(candidates, key=str.lower),
+                format_func=lambda n: display_name(n, dlc_names), key="team_must_include",
+                help="Build the rest of the team around these characters.",
+            )
+        with col_b:
+            exclude = st.multiselect(
+                "Exclude", options=sorted(candidates, key=str.lower),
+                format_func=lambda n: display_name(n, dlc_names), key="team_exclude",
+                help="Leave these characters out of consideration entirely.",
+            )
+
+    col_build, col_shuffle = st.columns([1, 1])
+    build_clicked = col_build.button("Build Team", type="primary")
+    shuffle_clicked = col_shuffle.button(
+        "🎲 Different team, same pool",
+        help="Same candidate pool and settings, but weighted-random picks instead of always the single "
+             "top scorer per role - use this if you don't want the exact same team every time.",
+    )
+
+    if build_clicked:
+        st.session_state["team_seed"] = None  # deterministic top-picks team
+    if shuffle_clicked:
+        st.session_state["team_seed"] = np.random.default_rng().integers(0, 2**31 - 1)
+
+    if build_clicked or shuffle_clicked:
+        seed = st.session_state.get("team_seed")
+        rng = np.random.default_rng(seed) if seed is not None else None
         team = build_team_with_paths(
             candidates, base_stats_df, growth_rates_df, stat_boosts_df,
             team_size=team_size, target_level=target_level,
             eligibility_df=eligibility_df, character_gender_df=character_gender_df,
+            must_include=must_include, exclude=exclude, rng=rng,
         )
         if not team:
             st.warning("Couldn't build a team from this pool - try a larger candidate pool.")
         else:
             if len(team) < team_size:
                 st.caption(f"Only {len(team)} candidates were available in this pool.")
-            render_team(team)
+            render_team(team, dlc_names)
 
 
 def main():
     base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df = load_data()
     playable_names = get_playable_names(base_stats_df)
+    dlc_names = get_dlc_names(base_stats_df)
 
     st.title("⚔️ Three Houses Class Optimizer")
 
     tab1, tab2 = st.tabs(["Character Optimizer", "Team Builder"])
     with tab1:
-        render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df, playable_names)
+        render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df, playable_names, dlc_names)
     with tab2:
-        render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df, playable_names)
+        render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df, playable_names, dlc_names)
 
 
 if __name__ == "__main__":

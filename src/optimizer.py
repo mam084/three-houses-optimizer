@@ -223,6 +223,133 @@ def score_class_for_role(boost_row: pd.Series, role_weights: dict) -> float:
     return score
 
 
+def primary_stats_for_role(role_weights: dict) -> list[str]:
+    """The stat(s) tied for the highest weight in a role profile - e.g. ["HP", "Def"] for Tank."""
+    top_weight = max(role_weights.values())
+    return [stat for stat, weight in role_weights.items() if weight == top_weight]
+
+
+# Hand-curated from each Beginner class's documented weapon/magic
+# proficiency on Serenes Forest (https://serenesforest.net/three-houses/classes/):
+# Myrmidon (sword), Soldier (lance), and Fighter (axe/bow/brawl) are all
+# physical; Monk (reason/faith) is the only magic-proficient Beginner
+# class. This mirrors the precedent set by class_eligibility.csv and
+# character_gender.csv - a small, stable, hand-verified table for
+# information the stat-boost data alone doesn't carry - and exists
+# specifically because Beginner-tier boosts are too sparse (a single +1
+# each, to four different stats) to ever encode a physical-vs-magic
+# distinction; see restrict_to_primary_relevant's docstring for the bug
+# this was added to fix ("why Soldier for mages?").
+BEGINNER_CLASS_AFFINITY = {
+    "Myrmidon": "physical",
+    "Soldier": "physical",
+    "Fighter": "physical",
+    "Monk": "magic",
+}
+
+
+def apply_weapon_affinity_override(
+    tier_classes: pd.DataFrame, role_name: str, role_weights: dict
+) -> pd.DataFrame:
+    """
+    For the two Attacker roles specifically, if this tier's stat-boost data
+    is completely uninformative about the role's primary stat (every
+    candidate is at 0 - the exact situation restrict_to_primary_relevant
+    can't resolve on its own, since even the "right" answer scores 0),
+    fall back to each class's known weapon/magic proficiency instead of
+    leaving the pick to whichever class happens to have an unrelated
+    secondary-stat boost. Currently only has data for Beginner-tier
+    classes (see BEGINNER_CLASS_AFFINITY) - a no-op at every other tier,
+    where real Mag/Str stat boosts already differentiate classes fine.
+    """
+    if role_name not in ("Physical Attacker", "Magic Attacker"):
+        return tier_classes
+
+    primary_stats = [s for s in primary_stats_for_role(role_weights) if s in tier_classes.columns]
+    stat_data_is_informative = bool(primary_stats) and (tier_classes[primary_stats] > 0).any(axis=1).any()
+    if stat_data_is_informative:
+        return tier_classes
+
+    affinity_target = "magic" if role_name == "Magic Attacker" else "physical"
+    affinity_matches = tier_classes[
+        tier_classes["name"].map(BEGINNER_CLASS_AFFINITY).eq(affinity_target)
+    ]
+    if affinity_matches.empty:
+        return tier_classes  # no known-affinity class available - fall back to unrestricted (honest tie)
+    return affinity_matches
+
+
+def restrict_to_primary_relevant(tier_classes: pd.DataFrame, role_weights: dict) -> pd.DataFrame:
+    """
+    Narrow a tier's candidate classes to those that contribute at least
+    something to the role's most important stat(s), when at least one
+    candidate does.
+
+    Why this exists: Beginner-tier stat boosts are tiny (a single +1) and,
+    per Serenes Forest, none of the four Beginner classes (Myrmidon,
+    Soldier, Fighter, Monk) boosts Magic at all - only Monk has any magic
+    proficiency (it's the lead-in to Mage/Priest), and its one boost is to
+    Resistance. Without this guard, scoring "Magic Attacker" fit as a flat
+    dot-product let Soldier's incidental +1 Dex (Magic Attacker's minor
+    secondary weight) numerically outscore Monk's irrelevant +1 Res, so the
+    tool recommended Soldier - a lance class with no magic proficiency at
+    all - as the "best" Beginner step for a mage. (This was the reported
+    "why Soldier for mages?" bug.)
+
+    The fix: a class with zero contribution to the role's primary stat(s)
+    should never out-rank a class that has some, purely on the strength of
+    secondary stats. So if any candidate in the tier has a nonzero primary
+    stat, candidates with zero across all primary stats are dropped before
+    scoring; the remaining candidates are still ranked by the full weighted
+    score (secondary stats still refine ordering among relevant options).
+    If NO candidate has any primary-stat relevance (a genuine tie, e.g.
+    Tank at Beginner tier, where nothing boosts HP or Def), no restriction
+    is applied and the tier is scored as before - that's an honest gap in
+    the data, not something a tie-break should paper over.
+    """
+    primary_stats = [s for s in primary_stats_for_role(role_weights) if s in tier_classes.columns]
+    if not primary_stats:
+        return tier_classes
+
+    has_primary_relevance = (tier_classes[primary_stats] > 0).any(axis=1)
+    if has_primary_relevance.any():
+        return tier_classes[has_primary_relevance]
+    return tier_classes
+
+
+def explain_pick(boost_row: pd.Series, role_weights: dict, role_name: str | None = None) -> str:
+    """
+    One-sentence, human-readable reason a class was picked for a role, so
+    the recommendation isn't just a bare class name and a score.
+
+    Names the 1-2 stat boosts that drove the score, in plain terms (e.g.
+    "boosts Mag +3 and Res +1"). If none of the role's weighted stats are
+    boosted at all, checks whether the pick came from the weapon-affinity
+    fallback (see apply_weapon_affinity_override) before falling back to a
+    generic "no good option" explanation - e.g. Monk winning Magic Attacker
+    at Beginner tier despite a 0 stat score, because it's the only
+    magic-proficient class available, not because a stat says so.
+    """
+    contributions = [
+        (stat, boost_row[stat], weight)
+        for stat, weight in role_weights.items()
+        if weight > 0 and stat in boost_row.index and boost_row[stat] > 0
+    ]
+    if contributions:
+        contributions.sort(key=lambda c: c[1] * c[2], reverse=True)
+        parts = [f"+{int(boost) if float(boost).is_integer() else boost} {stat}" for stat, boost, _ in contributions[:2]]
+        return f"Best fit at this tier - boosts {' and '.join(parts)}, matching this role's priorities."
+
+    class_name = boost_row.get("name")
+    affinity = BEGINNER_CLASS_AFFINITY.get(class_name)
+    if role_name == "Magic Attacker" and affinity == "magic":
+        return "No Beginner class boosts Magic directly, but this is the only one with magic proficiency (Reason/Faith) - the natural stepping stone toward Mage/Priest."
+    if role_name == "Physical Attacker" and affinity == "physical":
+        return "Boosts a stat outside this role's weighting, but it's a physical-weapon class at a tier with no clearer signal."
+
+    return "No class at this tier boosts a stat this role cares about - this is the least-irrelevant option available."
+
+
 def recommend_path(
     stat_boosts_df: pd.DataFrame,
     role_name: str,
@@ -279,6 +406,9 @@ def recommend_path(
         if tier_classes.empty:
             continue
 
+        tier_classes = apply_weapon_affinity_override(tier_classes, role_name, role_weights)
+        tier_classes = restrict_to_primary_relevant(tier_classes, role_weights)
+
         scores = tier_classes.apply(lambda row: score_class_for_role(row, role_weights), axis=1)
         best_idx = scores.idxmax()
         best_row = tier_classes.loc[best_idx]
@@ -287,6 +417,7 @@ def recommend_path(
             "tier": tier,
             "class": best_row["name"],
             "score": round(float(scores.loc[best_idx]), 2),
+            "why": explain_pick(best_row, role_weights, role_name),
         })
 
     return path
@@ -315,6 +446,7 @@ def eligible_unique_classes(
     """
     unique_classes = stat_boosts_df[stat_boosts_df["tier"] == "Unique"]
     unique_classes = unique_classes[~unique_classes["name"].str.contains(r"\(", regex=True)]
+    unique_classes = restrict_to_primary_relevant(unique_classes, role_weights)
 
     results = []
     for _, row in unique_classes.iterrows():
@@ -460,6 +592,7 @@ def main():
     else:
         for step in result["path"]:
             print(f"  {step['tier']:>13}: {step['class']} (fit score {step['score']})")
+            print(f"  {'':>13}  -> {step['why']}")
         print(f"Expected stats at level {result['expected_stats_at_level']} as {result['path'][-1]['class']}:")
         print(f"  {result['expected_final_stats']}")
 

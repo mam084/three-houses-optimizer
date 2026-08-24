@@ -14,6 +14,10 @@ Built as a portfolio project. Started as a Pokemon competitive team-builder; piv
 - **Class path recommendation** - best-fitting class at each tier (Beginner -> Intermediate -> Advanced -> Master) toward the target role, truncated to whichever tiers are actually reachable at the target level (e.g. targeting level 15 stops after Intermediate, since Advanced requires level 20)
 - **Eligibility-aware** - recommendations respect character-locked and gender-locked classes (e.g. "Lord" is only ever recommended to the three house leaders, "Falcon Knight" only to characters who can access it), so the tool never suggests a class that character couldn't actually take in-game
 - **Stat projection** - expected stats at a chosen level, shown as a before/after radar chart against the character's Level 1 base stats
+- **"Why" explanations** - every recommended class step, and every team member's slot, comes with a plain-language reason (the stat boosts that drove it, or - when the tier's stat data genuinely can't differentiate a role, like Magic vs. Physical at Beginner tier - the weapon/magic proficiency that did instead)
+- **Route-aware team building** - a route's candidate pool is that house's students plus the Protagonist and the Church/Knights of Seiros staff (recruitable on any route), not just the house alone; DLC-exclusive characters (Cindered Shadows) are opt-in and clearly tagged `(DLC)` everywhere they appear, never mixed in silently
+- **Team variety and targeting** - "Different team, same pool" regenerates via weighted-random picks instead of the same deterministic top-scorers every time; "Must include" / "Exclude" let you build around specific characters instead of only ever getting the tool's own picks
+- **Portrait support (bring your own art)** - the UI will show a character portrait from `assets/portraits/` if you provide one; falls back to a plain placeholder otherwise. Actual Three Houses character art isn't bundled (see `assets/portraits/README.md`) since it isn't this project's IP to redistribute.
 
 ## Known Simplifications
 
@@ -24,6 +28,9 @@ Worth being upfront about, since these are real gaps between this tool and the a
 - **Only the final class's stat boost is applied.** In the real game, boosts don't stack across a career path - only your current class's boost counts. The earlier tiers in a recommended path are shown for progression flavor, not because their boosts contribute to the final projected stats.
 - **Stat projections are expected values, not simulations.** A 45% growth rate contributes 0.45 expected points per level, not a simulated coin-flip per level-up. This is the right number for comparing paths against each other on average, but doesn't show the range of outcomes a real playthrough could produce.
 - **Character/class eligibility data is hand-curated, not scraped.** `class_eligibility.csv` and `character_gender.csv` were built by hand from Serenes Forest's classes page (which marks gender-locked classes with `[M]`/`[F]` tags) and cross-checked against other sources, rather than added to the scraper - it's a small, stable ~65-row dataset that doesn't change between game updates, so a dedicated scraping path wasn't worth the complexity.
+- **Beginner-tier stat boosts can't distinguish Magic from Physical on their own, so a small hand-curated weapon-affinity table fills the gap.** Per Serenes Forest, all four Beginner classes give a single +1 to an unrelated stat (Myrmidon/Spd, Soldier/Dex, Fighter/Str, Monk/Res) - none boosts Magic at all, even Monk, the class that actually leads toward Mage/Priest. Scoring by stat boosts alone, a mage's Beginner recommendation came out "Soldier" (its incidental +1 Dex outscored Monk's irrelevant +1 Res on the Magic Attacker role's minor Dex weighting) - technically correct math, but a thematically wrong recommendation. `BEGINNER_CLASS_AFFINITY` in `src/optimizer.py` (Myrmidon/Soldier/Fighter = physical, Monk = magic, per each class's documented weapon/magic proficiency) breaks that specific tie; it only ever activates when the ordinary stat data is fully uninformative, so it doesn't touch tiers where real Mag/Str differences already decide correctly.
+- **Recruitment eligibility beyond "which route" isn't modeled.** The team builder's route pools (a house's students + Protagonist + Church/Knights of Seiros staff) reflect who's *broadly* recruitable on that route, not the in-game stat/support requirements for recruiting a specific character from another house - that's a real mechanic this tool doesn't simulate.
+- **Team variety is weighted-random, not a curated set of alternatives.** "Different team, same pool" re-samples per role weighted toward higher-scoring candidates; it can occasionally repeat the same team by chance, and it's not aiming for "the 2nd-best team" in any globally-optimal sense - just a different reasonable one.
 
 ## Tech Stack
 
@@ -58,12 +65,17 @@ python -m src.optimizer Bernadetta
 python -m src.optimizer Dedue --role "Magic Attacker" --level 30
 python -m src.team_builder --house "Black Eagles" --size 6
 python -m src.team_builder --size 8
+python -m src.team_builder --house "Golden Deer" --include-dlc --size 6
+python -m src.team_builder --must-include "Lysithea,Dedue" --exclude "Felix" --size 6
+python -m src.team_builder --size 6 --seed 42   # weighted-random variety instead of the same team every time
 ```
 
 ## Project Structure
 
 ```
 three-houses-optimizer/
+├── assets/
+│   └── portraits/                   # bring-your-own character art - see its README
 ├── data/
 │   ├── character_base_stats.csv
 │   ├── character_growth_rates.csv
@@ -85,7 +97,7 @@ three-houses-optimizer/
 **`src/`**
 - `scrape_serenes.py` - pulls character and class data from Serenes Forest, with manual BeautifulSoup row parsing (not `pandas.read_html()`) to correctly handle the site's spoiler-toggle rows
 - `optimizer.py` - the recommendation logic: role detection, level-gated and eligibility-aware class path selection, stat projection
-- `team_builder.py` - builds a balanced, eligibility-aware team from a candidate pool via round-robin selection across auto-detected roles
+- `team_builder.py` - builds a balanced, eligibility-aware team from a candidate pool via round-robin selection across auto-detected roles; also owns route-aware candidate pooling (`get_candidate_pool`), must-include/exclude filtering, and the weighted-random variety mode
 
 **`app.py`** - the Streamlit dashboard.
 
