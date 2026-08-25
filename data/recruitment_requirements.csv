@@ -1,0 +1,25 @@
+character,home_house,byleth_level_required,stat_required,skill_required,skill_rank_required,notes
+Edelgard,Black Eagles,,,,,Cannot be recruited outside her own route
+Hubert,Black Eagles,,,,,Cannot be recruited outside his own route
+Ferdinand,Black Eagles,10,Dex,Heavy Armour,C,B support with Byleth lowers requirements
+Linhardt,Black Eagles,10,Mag,Reason,C,B support with Byleth lowers requirements
+Caspar,Black Eagles,10,Str,Brawling,C,B support with Byleth lowers requirements
+Bernadetta,Black Eagles,20,Str,Bow,C,B support with Byleth lowers requirements
+Dorothea,Black Eagles,25,Cha,Authority,B,B support with Byleth lowers requirements
+Petra,Black Eagles,10,Dex,Riding,C,B support with Byleth lowers requirements
+Dimitri,Blue Lions,,,,,Cannot be recruited outside his own route
+Dedue,Blue Lions,,,,,Cannot be recruited outside his own route
+Felix,Blue Lions,15,Spd,Sword,B+,B support with Byleth lowers requirements
+Ashe,Blue Lions,15,Cha,Lance,C,Leaves in Part 2 unless Edelgard or Dimitri is present
+Sylvain,Blue Lions,25,Cha,Reason,C,Auto-joins if the Protagonist is female
+Mercedes,Blue Lions,15,Mag,Bow,C,B support with Byleth lowers requirements
+Annette,Blue Lions,10,Mag,Faith,B,B support with Byleth lowers requirements
+Ingrid,Blue Lions,15,Dex,Flying,D,B support with Byleth lowers requirements
+Claude,Golden Deer,,,,,Cannot be recruited outside his own route
+Lorenz,Golden Deer,20,Cha,Reason,C,Leaves in Part 2 unless Edelgard or Claude is present
+Raphael,Golden Deer,20,Str,Heavy Armour,C,B support with Byleth lowers requirements
+Ignatz,Golden Deer,10,Dex,Authority,B,B support with Byleth lowers requirements
+Lysithea,Golden Deer,15,Mag,Faith,B,Has a defeatable alternative in Chapter 14 if unrecruited
+Marianne,Golden Deer,10,Mag,Riding,C,B support with Byleth lowers requirements
+Hilda,Golden Deer,30,Cha,Axe,C,Unavailable to Black Eagles until Chapter 12
+Leonie,Golden Deer,15,Str,Lance,C,B support with Byleth lowers requirements

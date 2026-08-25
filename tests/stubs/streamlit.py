@@ -1,0 +1,144 @@
+"""
+Minimal Streamlit stub used only by tests/test_app_smoke.py.
+
+Real Streamlit widgets need a live browser session and can't run under
+`unittest`; this stand-in reproduces just enough of the API surface
+(selectbox/slider/checkbox/multiselect/button/columns/container/expander/
+tabs/session_state/cache_data/plotly_chart/...) to import app.py and call
+its render_* functions directly, so at least "does this code run without
+crashing, with these widget values" is covered by an automated test. It is
+NOT a substitute for actually running `streamlit run app.py` - visual
+layout, reactivity, and real widget behavior aren't exercised at all, only
+the Python logic behind each render function. See test_app_smoke.py for
+how WIDGET_OVERRIDES is used to control what each widget "returns".
+"""
+
+class _SessionState(dict):
+    def __getattr__(self, k):
+        try:
+            return self[k]
+        except KeyError:
+            raise AttributeError(k)
+
+    def __setattr__(self, k, v):
+        self[k] = v
+
+
+session_state = _SessionState()
+WIDGET_OVERRIDES = {}  # key/label -> forced return value, set by the test before calling into app.py
+
+
+def _override(key, default):
+    return WIDGET_OVERRIDES.get(key, default)
+
+
+def set_page_config(**kwargs):
+    pass
+
+
+def cache_data(func=None, **kwargs):
+    if func is None:
+        return lambda f: f
+    return func
+
+
+def title(x):
+    pass
+
+
+def subheader(x):
+    pass
+
+
+def caption(x):
+    pass
+
+
+def divider():
+    pass
+
+
+def write(x):
+    pass
+
+
+def markdown(x, **kw):
+    pass
+
+
+def info(x):
+    pass
+
+
+def warning(x):
+    print("st.warning:", x)
+
+
+def error(x):
+    print("st.error:", x)
+
+
+def stop():
+    raise SystemExit("st.stop() called")
+
+
+def image(*a, **k):
+    pass
+
+
+class _Block:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def __getattr__(self, name):
+        # Mirrors real Streamlit: a column/container/tab supports the same
+        # widget calls as the top-level `st` module (st.columns()[0].button(...)).
+        fn = globals().get(name)
+        if fn is None:
+            raise AttributeError(name)
+        return fn
+
+
+def columns(spec):
+    n = spec if isinstance(spec, int) else len(spec)
+    return [_Block() for _ in range(n)]
+
+
+def container(border=None):
+    return _Block()
+
+
+def expander(label):
+    return _Block()
+
+
+def tabs(labels):
+    return [_Block() for _ in labels]
+
+
+def selectbox(label, options, index=0, key=None, format_func=None, help=None):
+    default = options[index] if options else None
+    return _override(key or label, default)
+
+
+def slider(label, min_value=None, max_value=None, value=None, key=None):
+    return _override(key or label, value)
+
+
+def checkbox(label, value=False, key=None, help=None):
+    return _override(key or label, value)
+
+
+def multiselect(label, options, format_func=None, key=None, help=None):
+    return _override(key or label, [])
+
+
+def button(label, type=None, help=None):
+    return _override(label, False)
+
+
+def plotly_chart(fig, use_container_width=True, key=None):
+    pass

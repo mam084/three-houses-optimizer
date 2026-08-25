@@ -144,9 +144,29 @@ ROLE_PROFILES = {
     "Physical Attacker": {"Str": 1.0, "Spd": 0.5},
     "Magic Attacker": {"Mag": 1.0, "Dex": 0.3},
     "Tank": {"HP": 1.0, "Def": 1.0},
-    "Support": {"Res": 0.7, "Cha": 0.7},
+    "Support": {"Res": 1.0},
     "Speed/Precision": {"Spd": 0.7, "Dex": 0.3, "Mov": 1.0},
 }
+# Support used to also weight Cha (Charisma) at the same strength as Res, on
+# the theory that "support" characters tend to be likeable/persuasive. In
+# practice this conflated two unrelated things: Res/Faith-magic is what
+# actually makes someone a good healer, while Cha governs battalion gambits
+# and support-conversation unlocks - a "leadership" stat, not a "healing
+# aptitude" one. Every one of Three Houses's three house leaders (Edelgard,
+# Dimitri, Claude) has an unusually high Cha growth rate simply by virtue of
+# being a lord, which - standardized against the roster (see
+# detect_natural_role) - was enough to outscore their own much more
+# on-theme Str/combat lean and get them auto-detected as "Support." That's
+# the reported "why is Edelgard a Gremory??" bug: her natural-role
+# auto-detection came back Support, so her recommended path ran Monk ->
+# Priest -> Bishop -> Gremory, a healer/mage lineage with nothing to do
+# with the axe-wielding Emperor she actually becomes. Dropping Cha from
+# Support's weighting (verified against the full roster - Edelgard now
+# correctly detects as Physical Attacker, and known healer archetypes like
+# Mercedes/Flayn/Marianne/Linhardt still correctly detect as Support) fixes
+# this without touching anything else; Cha still matters for eligibility
+# (Dancer, the Lord line) and is still part of the projected stat block,
+# it just no longer drives natural-role detection.
 
 
 def role_to_vector(role_weights: dict, stat_cols: list[str]) -> np.ndarray:
@@ -229,40 +249,107 @@ def primary_stats_for_role(role_weights: dict) -> list[str]:
     return [stat for stat, weight in role_weights.items() if weight == top_weight]
 
 
-# Hand-curated from each Beginner class's documented weapon/magic
-# proficiency on Serenes Forest (https://serenesforest.net/three-houses/classes/):
-# Myrmidon (sword), Soldier (lance), and Fighter (axe/bow/brawl) are all
-# physical; Monk (reason/faith) is the only magic-proficient Beginner
-# class. This mirrors the precedent set by class_eligibility.csv and
-# character_gender.csv - a small, stable, hand-verified table for
-# information the stat-boost data alone doesn't carry - and exists
-# specifically because Beginner-tier boosts are too sparse (a single +1
-# each, to four different stats) to ever encode a physical-vs-magic
-# distinction; see restrict_to_primary_relevant's docstring for the bug
-# this was added to fix ("why Soldier for mages?").
-BEGINNER_CLASS_AFFINITY = {
-    "Myrmidon": "physical",
-    "Soldier": "physical",
-    "Fighter": "physical",
-    "Monk": "magic",
-}
+def load_weapon_requirements_lookup(weapon_req_df: pd.DataFrame | None) -> dict:
+    """
+    Index data/class_weapon_requirements.csv by class_name. Each entry is
+    {"tier", "weapon_category" ("physical"/"magic"/"hybrid" - whether the
+    class's certification needs a physical weapon skill, a magic skill, or
+    both), "requirement_type" ("AND"/"OR" - whether every listed
+    requirement is needed or just one of them), "requirements" (a list of
+    (skill, rank) tuples, e.g. [("Sword", "B"), ("Axe", "C")])}.
+
+    Hand-curated from Serenes Forest's certification-exam requirements
+    (https://serenesforest.net/three-houses/) - the same precedent as
+    class_eligibility.csv and character_gender.csv: a small, stable table
+    for information the stat-boost data alone doesn't carry. A class
+    absent from this CSV (Unique-tier classes, NPC/Enemy classes) has no
+    certification-exam requirement to model - they unlock via story
+    progression instead - and simply won't appear in the lookup.
+    """
+    if weapon_req_df is None:
+        return {}
+    lookup = {}
+    for _, row in weapon_req_df.iterrows():
+        requirements = [tuple(part.split(":")) for part in row["requirements"].split("|")]
+        lookup[row["class_name"]] = {
+            "tier": row["tier"],
+            "weapon_category": row["weapon_category"],
+            "requirement_type": row["requirement_type"],
+            "requirements": requirements,
+        }
+    return lookup
 
 
-def apply_weapon_affinity_override(
-    tier_classes: pd.DataFrame, role_name: str, role_weights: dict
+def format_requirement(class_name: str, weapon_req_lookup: dict) -> str | None:
+    """
+    Human-readable certification requirement for a class, e.g. "Sword B or
+    Axe C" (an OR - either satisfies it) or "Axe C and Heavy Armour D" (an
+    AND - both are needed). Returns None if the class has no requirement
+    data (see load_weapon_requirements_lookup).
+    """
+    info = weapon_req_lookup.get(class_name) if weapon_req_lookup else None
+    if info is None:
+        return None
+    joiner = " or " if info["requirement_type"] == "OR" else " and "
+    return joiner.join(f"{skill} {rank}" for skill, rank in info["requirements"])
+
+
+def load_character_proficiency_lookup(character_weapon_talent_df: pd.DataFrame | None) -> dict:
+    """
+    Index data/character_weapon_talent.csv by character name -> the set of
+    skill types that character starts with at their own personal-best
+    starting rank (per Serenes Forest's skill-levels page - each
+    character's Level 1 skill ranks are listed there; "natural
+    proficiency" here means whichever skill(s) that character's own
+    starting ranks are highest in, not a designer-labeled "Talent"). E.g.
+    Felix's listed starting ranks are Sword D / Bow E+ / Brawling E+, so
+    his natural proficiency is {"Sword"}. Several characters are tied
+    across more than one skill (e.g. Sylvain: Lance/Axe/Riding all D) -
+    every tied skill is included, not just one.
+    """
+    if character_weapon_talent_df is None:
+        return {}
+    lookup = {}
+    for _, row in character_weapon_talent_df.iterrows():
+        skills = row.get("natural_proficiencies")
+        lookup[row["name"]] = set(skills.split("|")) if isinstance(skills, str) and skills else set()
+    return lookup
+
+
+def apply_weapon_affinity_fallback(
+    tier_classes: pd.DataFrame,
+    role_name: str,
+    role_weights: dict,
+    weapon_req_lookup: dict,
+    character_proficiency: set | None = None,
 ) -> pd.DataFrame:
     """
     For the two Attacker roles specifically, if this tier's stat-boost data
     is completely uninformative about the role's primary stat (every
     candidate is at 0 - the exact situation restrict_to_primary_relevant
     can't resolve on its own, since even the "right" answer scores 0),
-    fall back to each class's known weapon/magic proficiency instead of
-    leaving the pick to whichever class happens to have an unrelated
-    secondary-stat boost. Currently only has data for Beginner-tier
-    classes (see BEGINNER_CLASS_AFFINITY) - a no-op at every other tier,
-    where real Mag/Str stat boosts already differentiate classes fine.
+    fall back to each class's real certification weapon/magic requirement
+    (data/class_weapon_requirements.csv - see load_weapon_requirements_lookup)
+    instead of leaving the pick to whichever class happens to have an
+    unrelated secondary-stat boost. This generalizes what used to be a
+    Beginner-only hardcoded physical/magic table (BEGINNER_CLASS_AFFINITY,
+    added to fix the original "why Soldier for mages?" bug - see
+    restrict_to_primary_relevant's docstring) into real requirement data
+    that applies at any tier; it's still a no-op almost everywhere else,
+    since real Mag/Str stat boosts already differentiate classes fine past
+    Beginner tier - Beginner is just the one tier sparse enough (a single
+    +1 each, to four different stats) that this fallback usually has
+    something to do.
+
+    When more than one class matches the role's weapon/magic affinity
+    (e.g. two magic-leaning classes tied on stats), further narrows to
+    whichever also overlaps the character's own starting weapon
+    proficiency (character_proficiency - see
+    load_character_proficiency_lookup), when that narrows the field to at
+    least one match; otherwise leaves every affinity match in place as an
+    honest tie.
     """
-    if role_name not in ("Physical Attacker", "Magic Attacker"):
+    if role_name not in ("Physical Attacker", "Magic Attacker") or not weapon_req_lookup:
         return tier_classes
 
     primary_stats = [s for s in primary_stats_for_role(role_weights) if s in tier_classes.columns]
@@ -271,11 +358,24 @@ def apply_weapon_affinity_override(
         return tier_classes
 
     affinity_target = "magic" if role_name == "Magic Attacker" else "physical"
-    affinity_matches = tier_classes[
-        tier_classes["name"].map(BEGINNER_CLASS_AFFINITY).eq(affinity_target)
-    ]
+
+    def matches_affinity(name: str) -> bool:
+        info = weapon_req_lookup.get(name)
+        return info is not None and info["weapon_category"] in (affinity_target, "hybrid")
+
+    affinity_matches = tier_classes[tier_classes["name"].map(matches_affinity)]
     if affinity_matches.empty:
         return tier_classes  # no known-affinity class available - fall back to unrestricted (honest tie)
+
+    if character_proficiency and len(affinity_matches) > 1:
+        def matches_own_proficiency(name: str) -> bool:
+            required_skills = {skill for skill, _ in weapon_req_lookup[name]["requirements"]}
+            return bool(required_skills & character_proficiency)
+
+        proficiency_matches = affinity_matches[affinity_matches["name"].map(matches_own_proficiency)]
+        if not proficiency_matches.empty:
+            return proficiency_matches
+
     return affinity_matches
 
 
@@ -317,7 +417,13 @@ def restrict_to_primary_relevant(tier_classes: pd.DataFrame, role_weights: dict)
     return tier_classes
 
 
-def explain_pick(boost_row: pd.Series, role_weights: dict, role_name: str | None = None) -> str:
+def explain_pick(
+    boost_row: pd.Series,
+    role_weights: dict,
+    role_name: str | None = None,
+    weapon_req_lookup: dict | None = None,
+    character_proficiency: set | None = None,
+) -> str:
     """
     One-sentence, human-readable reason a class was picked for a role, so
     the recommendation isn't just a bare class name and a score.
@@ -325,10 +431,13 @@ def explain_pick(boost_row: pd.Series, role_weights: dict, role_name: str | None
     Names the 1-2 stat boosts that drove the score, in plain terms (e.g.
     "boosts Mag +3 and Res +1"). If none of the role's weighted stats are
     boosted at all, checks whether the pick came from the weapon-affinity
-    fallback (see apply_weapon_affinity_override) before falling back to a
+    fallback (see apply_weapon_affinity_fallback) before falling back to a
     generic "no good option" explanation - e.g. Monk winning Magic Attacker
     at Beginner tier despite a 0 stat score, because it's the only
-    magic-proficient class available, not because a stat says so.
+    magic-proficient class available, not because a stat says so. When the
+    fallback fired AND the class's requirement overlaps the character's own
+    starting weapon proficiency (character_proficiency - see
+    load_character_proficiency_lookup), that gets named too.
     """
     contributions = [
         (stat, boost_row[stat], weight)
@@ -341,11 +450,20 @@ def explain_pick(boost_row: pd.Series, role_weights: dict, role_name: str | None
         return f"Best fit at this tier - boosts {' and '.join(parts)}, matching this role's priorities."
 
     class_name = boost_row.get("name")
-    affinity = BEGINNER_CLASS_AFFINITY.get(class_name)
-    if role_name == "Magic Attacker" and affinity == "magic":
-        return "No Beginner class boosts Magic directly, but this is the only one with magic proficiency (Reason/Faith) - the natural stepping stone toward Mage/Priest."
-    if role_name == "Physical Attacker" and affinity == "physical":
-        return "Boosts a stat outside this role's weighting, but it's a physical-weapon class at a tier with no clearer signal."
+    info = weapon_req_lookup.get(class_name) if weapon_req_lookup else None
+    wants = "magic" if role_name == "Magic Attacker" else "physical" if role_name == "Physical Attacker" else None
+    if info is not None and wants is not None and info["weapon_category"] in (wants, "hybrid"):
+        requirement = format_requirement(class_name, weapon_req_lookup)
+        required_skills = {skill for skill, _ in info["requirements"]}
+        proficiency_note = ""
+        if character_proficiency and (required_skills & character_proficiency):
+            matched = ", ".join(sorted(required_skills & character_proficiency))
+            proficiency_note = f" - and it's this character's own starting strength ({matched})"
+        return (
+            f"No class at this tier boosts a stat this role cares about, but this is a "
+            f"{info['weapon_category']}-weapon class (requires {requirement}){proficiency_note}, "
+            f"a closer thematic fit than the alternatives."
+        )
 
     return "No class at this tier boosts a stat this role cares about - this is the least-irrelevant option available."
 
@@ -358,6 +476,8 @@ def recommend_path(
     character_name: str | None = None,
     eligibility_lookup: dict | None = None,
     character_gender: str | None = None,
+    weapon_req_lookup: dict | None = None,
+    character_proficiency: set | None = None,
 ) -> list[dict]:
     """
     For a target role, pick the best-fitting class at each tier in order.
@@ -406,21 +526,55 @@ def recommend_path(
         if tier_classes.empty:
             continue
 
-        tier_classes = apply_weapon_affinity_override(tier_classes, role_name, role_weights)
+        tier_classes = apply_weapon_affinity_fallback(
+            tier_classes, role_name, role_weights, weapon_req_lookup or {}, character_proficiency
+        )
         tier_classes = restrict_to_primary_relevant(tier_classes, role_weights)
 
         scores = tier_classes.apply(lambda row: score_class_for_role(row, role_weights), axis=1)
         best_idx = scores.idxmax()
         best_row = tier_classes.loc[best_idx]
+        best_class = best_row["name"]
 
         path.append({
             "tier": tier,
-            "class": best_row["name"],
+            "class": best_class,
             "score": round(float(scores.loc[best_idx]), 2),
-            "why": explain_pick(best_row, role_weights, role_name),
+            "why": explain_pick(best_row, role_weights, role_name, weapon_req_lookup, character_proficiency),
+            "requirement": format_requirement(best_class, weapon_req_lookup) if weapon_req_lookup else None,
         })
 
     return path
+
+
+def list_eligible_classes_at_tier(
+    tier: str,
+    stat_boosts_df: pd.DataFrame,
+    character_name: str | None = None,
+    eligibility_lookup: dict | None = None,
+    character_gender: str | None = None,
+) -> list[str]:
+    """
+    Every player-selectable class name at `tier` that character_name is
+    eligible for (same eligibility rules as recommend_path - see
+    is_class_eligible), excluding story/enemy-specific variant rows (e.g.
+    "Lord (Judith)"). If character_name/eligibility_lookup are omitted, no
+    eligibility filtering happens and every class at that tier is
+    returned.
+
+    Used to let a user override the recommended pick at a given tier with
+    any other class they were actually eligible for - the "mix and match"
+    path - rather than only ever seeing the single top-scoring choice.
+    """
+    tier_classes = stat_boosts_df[stat_boosts_df["tier"] == tier]
+    tier_classes = tier_classes[~tier_classes["name"].str.contains(r"\(", regex=True)]
+
+    if character_name is not None and eligibility_lookup is not None:
+        tier_classes = tier_classes[tier_classes["name"].apply(
+            lambda name: is_class_eligible(character_name, name, eligibility_lookup, character_gender)
+        )]
+
+    return sorted(tier_classes["name"].tolist())
 
 
 def eligible_unique_classes(
@@ -464,7 +618,7 @@ def expected_stats_at_level(
     base_row: pd.Series,
     growth_row: pd.Series,
     final_class_boost_row: pd.Series,
-    target_level: int = 20,
+    target_level: int = 30,
 ) -> dict:
     """
     Estimate a character's expected stats at target_level in a given final
@@ -490,15 +644,43 @@ def expected_stats_at_level(
     return result
 
 
+def stats_for_class_at_level(
+    character_name: str,
+    class_name: str,
+    base_stats_df: pd.DataFrame,
+    growth_rates_df: pd.DataFrame,
+    stat_boosts_df: pd.DataFrame,
+    target_level: int = 30,
+) -> dict | None:
+    """
+    Expected stats for character_name at target_level, if their current
+    class were class_name specifically - the same expected-value
+    calculation recommend_for_character uses for its recommended final
+    class (see expected_stats_at_level), just callable for any class the
+    user picks by hand. Powers the "mix and match" path override in the
+    UI: swap in a different class at whichever tier you'd actually end on,
+    and see the resulting projection, not just the tool's own top pick.
+    Returns None if class_name isn't in stat_boosts_df at all.
+    """
+    boost_rows = stat_boosts_df[stat_boosts_df["name"] == class_name]
+    if boost_rows.empty:
+        return None
+    base_row = base_stats_df[base_stats_df["name"] == character_name].iloc[0]
+    growth_row = growth_rates_df[growth_rates_df["name"] == character_name].iloc[0]
+    return expected_stats_at_level(base_row, growth_row, boost_rows.iloc[0], target_level)
+
+
 def recommend_for_character(
     character_name: str,
     base_stats_df: pd.DataFrame,
     growth_rates_df: pd.DataFrame,
     stat_boosts_df: pd.DataFrame,
     role_name: str | None = None,
-    target_level: int = 20,
+    target_level: int = 30,
     eligibility_df: pd.DataFrame | None = None,
     character_gender_df: pd.DataFrame | None = None,
+    weapon_req_df: pd.DataFrame | None = None,
+    character_weapon_talent_df: pd.DataFrame | None = None,
 ) -> dict:
     """
     Full recommendation for one character: auto-detects a role if none is
@@ -511,9 +693,14 @@ def recommend_for_character(
     eligible_unique_classes). character_gender_df (data/character_gender.csv)
     supplies the character's gender for that check; if omitted, gender-locked
     classes are treated as unrestricted rather than blocked (see
-    is_class_eligible). Both are optional and default to None, which
-    disables eligibility filtering entirely - existing callers that don't
-    pass them keep getting today's behavior.
+    is_class_eligible). weapon_req_df (data/class_weapon_requirements.csv)
+    and character_weapon_talent_df (data/character_weapon_talent.csv), if
+    given, attach a certification-requirement string to each path step and
+    feed the character's own starting weapon proficiency into the
+    weapon-affinity fallback (see apply_weapon_affinity_fallback). All four
+    are optional and default to None, which disables the corresponding
+    feature entirely - existing callers that don't pass them keep getting
+    today's behavior.
     """
     base_row = base_stats_df[base_stats_df["name"] == character_name].iloc[0]
     growth_row = growth_rates_df[growth_rates_df["name"] == character_name].iloc[0]
@@ -529,11 +716,18 @@ def recommend_for_character(
         if not gender_row.empty:
             character_gender = gender_row.iloc[0]["gender"]
 
+    weapon_req_lookup = load_weapon_requirements_lookup(weapon_req_df) if weapon_req_df is not None else None
+    character_proficiency_lookup = load_character_proficiency_lookup(character_weapon_talent_df) \
+        if character_weapon_talent_df is not None else {}
+    character_proficiency = character_proficiency_lookup.get(character_name)
+
     path = recommend_path(
         stat_boosts_df, used_role, target_level=target_level,
         character_name=character_name,
         eligibility_lookup=eligibility_lookup,
         character_gender=character_gender,
+        weapon_req_lookup=weapon_req_lookup,
+        character_proficiency=character_proficiency,
     )
     final_class_name = path[-1]["class"] if path else None
 
@@ -567,6 +761,8 @@ def main():
     stat_boosts_df = pd.read_csv(DATA_DIR / "class_stat_boosts.csv")
     eligibility_df = pd.read_csv(DATA_DIR / "class_eligibility.csv")
     character_gender_df = pd.read_csv(DATA_DIR / "character_gender.csv")
+    weapon_req_df = pd.read_csv(DATA_DIR / "class_weapon_requirements.csv")
+    character_weapon_talent_df = pd.read_csv(DATA_DIR / "character_weapon_talent.csv")
 
     import argparse
     parser = argparse.ArgumentParser(description="Recommend a Three Houses class path for a character.")
@@ -574,13 +770,14 @@ def main():
     parser.add_argument("--role", type=str, default=None,
                          choices=list(ROLE_PROFILES.keys()),
                          help="Target role (omit to auto-detect from growth rates)")
-    parser.add_argument("--level", type=int, default=20, help="Target level for stat projection")
+    parser.add_argument("--level", type=int, default=30, help="Target level for stat projection")
     args = parser.parse_args()
 
     result = recommend_for_character(
         args.character, base_stats_df, growth_rates_df, stat_boosts_df,
         role_name=args.role, target_level=args.level,
         eligibility_df=eligibility_df, character_gender_df=character_gender_df,
+        weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
     )
 
     print(f"\n{result['character']}")
@@ -592,6 +789,8 @@ def main():
     else:
         for step in result["path"]:
             print(f"  {step['tier']:>13}: {step['class']} (fit score {step['score']})")
+            if step.get("requirement"):
+                print(f"  {'':>13}     requires {step['requirement']}")
             print(f"  {'':>13}  -> {step['why']}")
         print(f"Expected stats at level {result['expected_stats_at_level']} as {result['path'][-1]['class']}:")
         print(f"  {result['expected_final_stats']}")
