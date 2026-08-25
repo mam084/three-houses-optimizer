@@ -1,0 +1,53 @@
+name,HP,Str,Mag,Dex,Spd,Lck,Def,Res,Cha,tier
+Noble,0,0,0,0,0,0,0,0,5,Unique
+Commoner,0,0,0,0,0,0,0,0,0,Unique
+Dancer,20,-5,0,0,0,0,-5,-5,10,Unique
+Enlightened One,20,10,10,0,0,0,5,0,5,Unique
+Armored Lord,20,5,5,0,0,0,5,5,10,Unique
+High Lord,20,5,0,5,0,0,5,0,10,Unique
+Wyvern Master,20,10,0,0,5,0,5,0,10,Unique
+Emperor,30,10,10,0,0,0,5,5,10,Unique
+Great Lord,30,10,0,10,0,0,5,0,10,Unique
+Barbarossa,30,15,0,0,10,0,5,0,10,Unique
+Myrmidon,10,0,0,0,5,0,0,-5,5,Beginner
+Soldier,10,0,0,5,0,0,0,-5,5,Beginner
+Fighter,10,5,0,0,0,0,0,-5,5,Beginner
+Monk,5,0,0,0,0,0,0,5,5,Beginner
+Lord,20,0,0,10,0,0,0,0,10,Intermediate
+Mercenary,20,5,0,0,5,0,0,-5,5,Intermediate
+Thief,20,0,0,10,10,0,0,0,5,Intermediate
+Armored Knight,20,0,0,0,-10,0,10,-5,5,Intermediate
+Cavalier,20,5,0,5,-10,0,5,0,5,Intermediate
+Brigand,30,10,0,0,0,0,0,-5,5,Intermediate
+Archer,5,0,0,10,0,5,0,0,5,Intermediate
+Brawler,30,0,-10,10,10,0,0,-10,5,Intermediate
+Mage,5,-5,10,5,0,0,-5,5,5,Intermediate
+Dark Mage,5,-5,10,5,0,0,-5,5,0,Intermediate
+Priest,5,-5,5,5,0,0,-5,10,10,Intermediate
+Pegasus Knight,15,0,0,0,10,0,0,5,10,Intermediate
+Hero,30,10,0,0,10,0,0,-5,5,Advanced
+Swordmaster,25,10,0,0,20,0,0,-5,5,Advanced
+Assassin,20,0,0,20,20,0,0,0,0,Advanced
+Fortress Knight,30,10,0,0,-10,0,15,0,5,Advanced
+Paladin,30,10,0,5,-10,5,5,5,5,Advanced
+Wyvern Rider,30,10,-5,0,0,0,5,-5,5,Advanced
+Warrior,40,15,-5,0,0,0,0,0,5,Advanced
+Sniper,10,5,0,20,0,10,0,0,5,Advanced
+Grappler,40,10,0,10,10,0,0,0,5,Advanced
+Warlock,10,0,10,0,0,0,-5,5,5,Advanced
+Dark Bishop,10,0,10,0,0,0,-5,5,0,Advanced
+Bishop,10,0,10,0,0,10,-5,5,10,Advanced
+Falcon Knight,30,10,0,0,20,0,0,5,10,Master
+Wyvern Lord,30,15,-5,0,10,0,5,0,5,Master
+Mortal Savant,20,10,10,0,-10,10,0,0,5,Master
+Great Knight,30,10,0,0,-10,0,5,-5,5,Master
+Bow Knight,10,0,0,0,-5,0,0,0,5,Master
+Dark Knight,10,5,10,0,-5,0,5,10,5,Master
+Holy Knight,10,0,10,0,-5,10,5,10,10,Master
+War Master,40,15,0,0,10,0,0,0,5,Master
+Gremory,10,0,10,10,0,0,0,5,10,Master
+Trickster,20,0,0,15,20,10,0,5,0,DLC Exclusive
+War Monk/Cleric,40,10,5,10,0,0,0,5,5,DLC Exclusive
+Dark Flier,20,0,0,0,10,0,0,10,10,DLC Exclusive
+Valkyrie,5,0,5,0,-5,5,5,10,10,DLC Exclusive
+Death Knight,30,10,10,0,-5,0,5,5,0,DLC Exclusive

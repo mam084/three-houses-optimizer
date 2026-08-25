@@ -89,13 +89,20 @@ ROUTE_LORD = {
 def mandatory_names_for_route(route: str | None) -> list[str]:
     """
     Characters who must be on the team for `route` regardless of fit
-    scoring - the Protagonist and that route's house leader, both
-    force-deployed on their own route (see ROUTE_LORD). Returns [] for
-    "Full roster"/None, since there's no single lord a mixed-route roster
-    is forced to include.
+    scoring - force-deployed story units the game doesn't let you leave
+    off the roster (see build_balanced_team's force_deployed param for
+    how this actually gets enforced, and its toggle-off).
+
+    The Protagonist (Byleth) is force-deployed on every route, including
+    "Full roster"/None - there's no route on which they're actually
+    benchable, so a "recommended team" that omits them isn't buildable
+    regardless of which pool it's drawn from. A specific route's own
+    house leader (see ROUTE_LORD) is added on top of that; "Full
+    roster"/None has no single lord a mixed-route roster is forced to
+    include, so only the Protagonist comes back for those.
     """
     if route is None or route == "Full roster" or route not in ROUTE_LORD:
-        return []
+        return ["Protagonist"]
     return ["Protagonist", ROUTE_LORD[route]]
 
 
@@ -322,6 +329,7 @@ def build_balanced_team(
     rng: np.random.Generator | None = None,
     recruitment_lookup: dict | None = None,
     cross_house_names: set | None = None,
+    force_deployed: set | None = None,
 ) -> list[dict]:
     """
     Build a team of team_size characters from the candidate pool, balancing
@@ -332,6 +340,15 @@ def build_balanced_team(
     fills the rest (e.g. "I'm building around Lysithea"). Each still gets a
     role assignment and its normal "why" explanation, just picked first.
     Silently ignored if a name isn't in candidates/growth_rates_df.
+
+    force_deployed: the subset of must_include (if any) that's on the team
+    because the game itself requires it - Byleth and the route's own lord
+    (see mandatory_names_for_route) - rather than because the user asked
+    for them. Purely cosmetic: it changes the "why" text from "Included by
+    request." to "Force-deployed - the game requires them on this route's
+    roster.", so a forced inclusion doesn't read as if it were an
+    optional, user-driven pick. Names here that aren't also in
+    must_include are ignored.
 
     exclude: characters to drop from the candidate pool before building -
     "give me a team, but not with Raphael" - applied after must_include, so
@@ -350,6 +367,7 @@ def build_balanced_team(
     order they were picked.
     """
     must_include = must_include or []
+    force_deployed = set(force_deployed or [])
     exclude = set(exclude or [])
     # must_include beats exclude for a name in both (see docstring above) - previously exclude was
     # applied to the candidate pool BEFORE must_include ever got a chance to add its names back, so a
@@ -376,11 +394,15 @@ def build_balanced_team(
         if name in picked or name not in by_character.index or len(team) >= team_size:
             continue
         row = by_character.loc[name]
+        base_why = (
+            "Force-deployed - the game requires them on this route's roster."
+            if name in force_deployed else "Included by request."
+        )
         team.append({
             "character": name,
             "role": row["role"],
             "score": round(float(row["score"]), 3),
-            "why": with_recruitment_note("Included by request.", name),
+            "why": with_recruitment_note(base_why, name),
         })
         picked.add(name)
 
@@ -468,6 +490,8 @@ def build_team_with_paths(
     starting_level_df: pd.DataFrame | None = None,
     include_dlc_classes: bool = False,
     locked_builds: dict | None = None,
+    class_growth_df: pd.DataFrame | None = None,
+    force_deployed: set | None = None,
 ) -> list[dict]:
     """
     Like build_balanced_team, but also attaches each member's full class-path
@@ -475,14 +499,15 @@ def build_team_with_paths(
     output is immediately useful rather than just a role assignment.
 
     eligibility_df, character_gender_df, weapon_req_df,
-    character_weapon_talent_df, starting_level_df and include_dlc_classes
-    are passed straight through to recommend_for_character - see its
-    docstring. All optional and default to None/False (the corresponding
-    feature disabled), for backward compatibility with existing callers.
-    must_include/exclude/rng/recruitment_lookup/cross_house_names are
-    passed straight through to build_balanced_team - see its docstring
-    (and cross_house_names_in_pool for how to compute that last one from a
-    get_candidate_pool result).
+    character_weapon_talent_df, starting_level_df, include_dlc_classes and
+    class_growth_df are passed straight through to
+    recommend_for_character - see its docstring. All optional and default
+    to None/False (the corresponding feature disabled), for backward
+    compatibility with existing callers.
+    must_include/exclude/rng/recruitment_lookup/cross_house_names/
+    force_deployed are passed straight through to build_balanced_team -
+    see its docstring (and cross_house_names_in_pool for how to compute
+    cross_house_names from a get_candidate_pool result).
 
     locked_builds: {character_name: {"path", "final_class",
     "expected_final_stats", "eligible_unique_classes"}} - for a character
@@ -501,6 +526,7 @@ def build_team_with_paths(
         candidates, growth_rates_df, team_size,
         must_include=must_include, exclude=exclude, rng=rng,
         recruitment_lookup=recruitment_lookup, cross_house_names=cross_house_names,
+        force_deployed=force_deployed,
     )
     locked_builds = locked_builds or {}
 
@@ -522,11 +548,13 @@ def build_team_with_paths(
             eligibility_df=eligibility_df, character_gender_df=character_gender_df,
             weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
             starting_level_df=starting_level_df, include_dlc_classes=include_dlc_classes,
+            class_growth_df=class_growth_df,
         )
         member["path"] = full_rec["path"]
         member["final_class"] = full_rec["path"][-1]["class"] if full_rec["path"] else None
         member["expected_final_stats"] = full_rec["expected_final_stats"]
         member["eligible_unique_classes"] = full_rec["eligible_unique_classes"]
+        member["weapon_switch_warning"] = full_rec.get("weapon_switch_warning")
 
     return team
 
@@ -541,6 +569,7 @@ def main():
     character_weapon_talent_df = pd.read_csv(DATA_DIR / "character_weapon_talent.csv")
     recruitment_requirements_df = pd.read_csv(DATA_DIR / "recruitment_requirements.csv")
     starting_level_df = pd.read_csv(DATA_DIR / "character_starting_level.csv")
+    class_growth_df = pd.read_csv(DATA_DIR / "class_growth_rates.csv")
 
     import argparse
     parser = argparse.ArgumentParser(description="Recommend a balanced Three Houses team.")
@@ -568,6 +597,10 @@ def main():
     parser.add_argument("--include-dlc-classes", action="store_true",
                          help="Also consider the Cindered Shadows certification classes as Advanced-tier "
                               "options for every team member.")
+    parser.add_argument("--no-force-deployments", action="store_true",
+                         help="Don't automatically force Byleth/the route's lord onto the team - build "
+                              "purely from fit scoring instead. Off by default, since in-game you can't "
+                              "actually leave them off the roster on a real route.")
     args = parser.parse_args()
 
     recruitment_lookup = load_recruitment_lookup(recruitment_requirements_df)
@@ -578,8 +611,10 @@ def main():
         target_level=args.target_level, recruitment_lookup=recruitment_lookup,
     )
     # Byleth and the route's own lord are force-deployed - always on the
-    # team for a real route, same as in-game (see mandatory_names_for_route).
-    mandatory = [n for n in mandatory_names_for_route(args.house) if n in candidates]
+    # team for a real route, same as in-game (see mandatory_names_for_route) -
+    # unless --no-force-deployments opts out of that.
+    mandatory = [n for n in mandatory_names_for_route(args.house) if n in candidates] \
+        if not args.no_force_deployments else []
     must_include = [n.strip() for n in args.must_include.split(",")] if args.must_include else []
     must_include = list(dict.fromkeys(mandatory + must_include))  # mandatory first, de-duplicated
     exclude = [n.strip() for n in args.exclude.split(",")] if args.exclude else None
@@ -594,6 +629,7 @@ def main():
         recruitment_lookup=recruitment_lookup, cross_house_names=cross_house_names,
         weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
         starting_level_df=starting_level_df, include_dlc_classes=args.include_dlc_classes,
+        class_growth_df=class_growth_df, force_deployed=set(mandatory),
     )
 
     dlc_names = set(base_stats_df[base_stats_df["house"] == DLC_HOUSE]["name"])

@@ -50,7 +50,7 @@ class TestAppSmoke(unittest.TestCase):
         (
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
-            self.recruitment_requirements_df, self.starting_level_df,
+            self.recruitment_requirements_df, self.starting_level_df, self.class_growth_df,
         ) = app.load_data()
         self.playable_names = app.get_playable_names(self.base_stats_df)
         self.dlc_names = app.get_dlc_names(self.base_stats_df)
@@ -59,14 +59,15 @@ class TestAppSmoke(unittest.TestCase):
         app.render_character_tab(
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
-            self.starting_level_df, self.playable_names, self.dlc_names,
+            self.starting_level_df, self.class_growth_df, self.playable_names, self.dlc_names,
         )
 
     def _render_team_tab(self):
         app.render_team_tab(
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
-            self.recruitment_requirements_df, self.starting_level_df, self.playable_names, self.dlc_names,
+            self.recruitment_requirements_df, self.starting_level_df, self.class_growth_df,
+            self.playable_names, self.dlc_names,
         )
 
     def test_character_tab_default_widgets(self):
@@ -77,7 +78,7 @@ class TestAppSmoke(unittest.TestCase):
         st.WIDGET_OVERRIDES = {
             "char_select": "Bernadetta",
             "char_role_select": "Magic Attacker",
-            "mixmatch_Bernadetta_Beginner": "Fighter",
+            "mixmatch_Bernadetta_Magic Attacker_Beginner": "Fighter",
         }
         self._render_character_tab()
 
@@ -164,14 +165,28 @@ class TestAppSmoke(unittest.TestCase):
         self.assertIn("Protagonist", members)
         self.assertIn("Claude", members)
 
-    def test_team_tab_full_roster_has_no_mandatory_names(self):
+    def test_team_tab_full_roster_forces_byleth_but_no_lord(self):
         st.WIDGET_OVERRIDES = {
             "team_route": "Full roster", "team_size": 3, "team_level": 30,
             "Build Team": True,
         }
         self._render_team_tab()
-        # Just needs to not crash and produce a team - "Full roster" has no single lord to force.
-        self.assertEqual(len(st.session_state["team_result"]), 3)
+        # "Full roster" has no single lord to force, but Byleth (the Protagonist) is always
+        # force-deployed regardless of route.
+        team = st.session_state["team_result"]
+        self.assertEqual(len(team), 3)
+        self.assertIn("Protagonist", [m["character"] for m in team])
+
+    def test_team_tab_no_force_deployments_toggle_lets_byleth_be_omitted(self):
+        st.WIDGET_OVERRIDES = {
+            "team_route": "Golden Deer", "team_size": 4, "team_level": 30,
+            "team_force_deployments": False,
+            "Build Team": True,
+        }
+        self._render_team_tab()
+        # Just needs to not crash - the toggle removes the forced inclusion, it doesn't guarantee
+        # Byleth/Claude are actually excluded (they may still win their role on fit alone).
+        self.assertEqual(len(st.session_state["team_result"]), 4)
 
     def test_team_tab_uses_imported_build(self):
         st.session_state["imported_builds"] = {
@@ -193,13 +208,13 @@ class TestAppSmoke(unittest.TestCase):
         self.assertEqual(members["Bernadetta"]["final_class"], "Fighter")
 
     def test_class_explorer_tab_default(self):
-        app.render_class_explorer_tab(self.stat_boosts_df, self.weapon_req_df)
+        app.render_class_explorer_tab(self.stat_boosts_df, self.weapon_req_df, self.class_growth_df)
 
     def test_class_explorer_tab_compare_two_classes(self):
         st.WIDGET_OVERRIDES = {
             "explorer_class_a": "Gremory", "explorer_class_b": "Bishop", "explorer_include_dlc": True,
         }
-        app.render_class_explorer_tab(self.stat_boosts_df, self.weapon_req_df)
+        app.render_class_explorer_tab(self.stat_boosts_df, self.weapon_req_df, self.class_growth_df)
 
 
 if __name__ == "__main__":

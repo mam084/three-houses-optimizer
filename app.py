@@ -24,10 +24,12 @@ from src.optimizer import (
     TIER_ORDER,
     format_requirement,
     list_eligible_classes_at_tier,
+    load_class_growth_lookup,
     load_eligibility_lookup,
     load_weapon_requirements_lookup,
     recommend_for_character,
     score_class_for_role,
+    score_growth_for_role,
     stats_for_class_at_level,
 )
 from src.team_builder import (
@@ -53,6 +55,7 @@ def load_data() -> tuple[pd.DataFrame, ...]:
         "character_base_stats.csv", "character_growth_rates.csv", "class_stat_boosts.csv",
         "class_eligibility.csv", "character_gender.csv", "class_weapon_requirements.csv",
         "character_weapon_talent.csv", "recruitment_requirements.csv", "character_starting_level.csv",
+        "class_growth_rates.csv",
     ]
     missing = [f for f in required if not (DATA_DIR / f).exists()]
     if missing:
@@ -74,6 +77,7 @@ def load_data() -> tuple[pd.DataFrame, ...]:
         pd.read_csv(DATA_DIR / "character_weapon_talent.csv"),
         pd.read_csv(DATA_DIR / "recruitment_requirements.csv"),
         pd.read_csv(DATA_DIR / "character_starting_level.csv"),
+        pd.read_csv(DATA_DIR / "class_growth_rates.csv"),
     )
 
 
@@ -123,6 +127,26 @@ def render_portrait(character_name: str, width: int = 96):
         )
 
 
+def growth_caption(class_name: str, class_growth_lookup: dict) -> str | None:
+    """
+    Human-readable summary of a class's own growth-RATE modifiers (see
+    optimizer.load_class_growth_lookup) - the top couple of stats it
+    speeds up, e.g. "Growth: +15% Str, +10% Spd" - or None if the class
+    has no meaningfully positive modifier on file. This is a genuinely
+    different mechanic from a class's flat one-time stat boost (shown
+    separately as "boosts X"): growth modifiers change how fast a stat
+    climbs on every level-up spent in that class, compounding over time.
+    """
+    mods = class_growth_lookup.get(class_name)
+    if not mods:
+        return None
+    positive = sorted(((s, v) for s, v in mods.items() if v > 0), key=lambda sv: sv[1], reverse=True)
+    if not positive:
+        return None
+    parts = [f"+{int(v) if float(v).is_integer() else v}% {s}" for s, v in positive[:2]]
+    return "Growth: " + ", ".join(parts)
+
+
 def render_path_with_mixmatch(
     path: list[dict],
     character: str,
@@ -130,7 +154,9 @@ def render_path_with_mixmatch(
     eligibility_lookup: dict | None,
     character_gender: str | None,
     role_weights: dict,
+    role_used: str,
     weapon_req_lookup: dict,
+    class_growth_lookup: dict,
     include_dlc_classes: bool = False,
 ) -> list[str]:
     """
@@ -146,14 +172,24 @@ def render_path_with_mixmatch(
     A user's own pick (not the recommended class) still shows its fit
     score against role_weights and its certification weapon-rank
     requirement (weapon_req_lookup - see load_weapon_requirements_lookup),
-    the same information the recommended pick gets, rather than just "your
-    pick, overrides the recommendation" with no numbers to compare against.
+    plus its own growth-rate modifiers (growth_caption), the same
+    information the recommended pick gets, rather than just "your pick,
+    overrides the recommendation" with no numbers to compare against.
+
+    role_used is folded into every selectbox's widget key - switching the
+    target role (or auto-detect landing on a different role) now resets
+    each tier's selection back to that new role's own recommendation,
+    instead of Streamlit silently keeping the previous role's picks
+    selected under an unchanged key (the reported "switching the target
+    role doesn't change the selected classes" bug).
     """
     st.subheader("Recommended Class Path")
     st.caption(
         "Swap in a different eligible class at any tier to compare - only the deepest tier's "
         "class feeds the projected stats below, since in-game a class boost doesn't stack across "
-        "a career path, only your current class's boost counts."
+        "a career path, only your current class's boost counts. Growth-rate modifiers, unlike the "
+        "flat boost, DO compound across every tier actually spent along the way - see the "
+        "projection's caption below."
     )
     cols = st.columns(len(path))
     selected = []
@@ -168,7 +204,7 @@ def render_path_with_mixmatch(
                 options = sorted(set(options) | {step["class"]})
             choice = st.selectbox(
                 step["tier"], options=options, index=options.index(step["class"]),
-                key=f"mixmatch_{character}_{step['tier']}",
+                key=f"mixmatch_{character}_{role_used}_{step['tier']}",
             )
             selected.append(choice)
             if choice == step["class"]:
@@ -177,6 +213,11 @@ def render_path_with_mixmatch(
                 st.caption(f"fit score {step['score']}")
                 if step.get("requirement"):
                     st.caption(f"Requires: {step['requirement']}")
+                growth_note = growth_caption(choice, class_growth_lookup)
+                if growth_note:
+                    st.caption(growth_note)
+                if step.get("weapon_switch_warning"):
+                    st.warning("Requires a weapon type never trained so far - a slow switch in practice.", icon="⚠️")
                 st.caption(step["why"])
             else:
                 choice_row = stat_boosts_df[stat_boosts_df["name"] == choice]
@@ -190,6 +231,9 @@ def render_path_with_mixmatch(
                 requirement = format_requirement(choice, weapon_req_lookup)
                 if requirement:
                     st.caption(f"Requires: {requirement}")
+                growth_note = growth_caption(choice, class_growth_lookup)
+                if growth_note:
+                    st.caption(growth_note)
     return selected
 
 
@@ -293,20 +337,23 @@ def render_team(team: list[dict], dlc_names: set[str]):
                 requirements = [step["requirement"] for step in member["path"] if step.get("requirement")]
                 if requirements:
                     st.caption("Requires (final tier): " + requirements[-1])
+                if member.get("weapon_switch_warning"):
+                    st.caption(f"⚠️ {member['weapon_switch_warning']}")
                 st.caption(f"Why on the team: {member['why']}")
 
 
 CLASS_CHART_STATS = STAT_COLS + ["Mov"]
 
 
-def render_class_explorer_tab(stat_boosts_df: pd.DataFrame, weapon_req_df: pd.DataFrame):
+def render_class_explorer_tab(stat_boosts_df: pd.DataFrame, weapon_req_df: pd.DataFrame, class_growth_df: pd.DataFrame):
     st.caption(
-        "Browse a class's own stat boosts - the flat bonus it adds on top of whatever character "
-        "wears it. Unlike most Fire Emblem games, Three Houses growth rates belong to the "
-        "*character*, not the class, and don't change based on what you're wearing - a class only "
-        "contributes its fixed boost (shown here) plus, at Master tier and above, a faster-climbing "
-        "stat cap. \"Class growth rates\" isn't really a thing in this game; this is the number that "
-        "actually plays that role."
+        "Browse a class's flat stat boost (the one-time bonus it adds on top of whatever character "
+        "wears it, active only while that's their current class) alongside its own growth-RATE "
+        "modifiers - a separate, real mechanic: every class also speeds up or slows down how fast "
+        "specific stats climb on each level-up spent in it, stacking with the character's own "
+        "personal growth rate. Both matter for a character's own path - see the Growth Rate "
+        "Modifiers tab below - and are compounded across their whole class path (not just the final "
+        "class) in the Character Optimizer tab's projection."
     )
 
     selectable = stat_boosts_df[~stat_boosts_df["name"].str.contains(r"\(", regex=True)]
@@ -325,6 +372,7 @@ def render_class_explorer_tab(stat_boosts_df: pd.DataFrame, weapon_req_df: pd.Da
     )
 
     weapon_req_lookup = load_weapon_requirements_lookup(weapon_req_df)
+    class_growth_lookup = load_class_growth_lookup(class_growth_df)
 
     col1, col2 = st.columns(2)
     with col1:
@@ -333,38 +381,71 @@ def render_class_explorer_tab(stat_boosts_df: pd.DataFrame, weapon_req_df: pd.Da
         class_b = st.selectbox("Compare with (optional)", options=["(none)"] + names, key="explorer_class_b")
 
     row_a = stat_boosts_df[stat_boosts_df["name"] == class_a].iloc[0]
-    st.caption(
-        f"**{class_a}** - {row_a['tier']} tier"
-        + (f" - requires {format_requirement(class_a, weapon_req_lookup)}"
-           if format_requirement(class_a, weapon_req_lookup) else "")
-    )
+    row_b = stat_boosts_df[stat_boosts_df["name"] == class_b].iloc[0] if class_b != "(none)" else None
 
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=CLASS_CHART_STATS, y=[row_a[s] for s in CLASS_CHART_STATS], name=class_a))
-    if class_b != "(none)":
-        row_b = stat_boosts_df[stat_boosts_df["name"] == class_b].iloc[0]
-        fig.add_trace(go.Bar(x=CLASS_CHART_STATS, y=[row_b[s] for s in CLASS_CHART_STATS], name=class_b))
-        req_b = format_requirement(class_b, weapon_req_lookup)
-        st.caption(f"**{class_b}** - {row_b['tier']} tier" + (f" - requires {req_b}" if req_b else ""))
+    def class_caption(name, row):
+        req = format_requirement(name, weapon_req_lookup)
+        return f"**{name}** - {row['tier']} tier" + (f" - requires {req}" if req else "")
 
-    all_values = [row_a[s] for s in CLASS_CHART_STATS]
-    if class_b != "(none)":
-        all_values += [row_b[s] for s in CLASS_CHART_STATS]
-    y_min = min(min(all_values), 0) * 1.2 if min(all_values) < 0 else 0
-    y_max = max(max(all_values), 1) * 1.25
-    fig.update_layout(
-        barmode="group",
-        height=420,
-        margin=dict(l=0, r=0, t=60, b=0),
-        yaxis_title="Stat boost",
-        yaxis=dict(range=[y_min, y_max]),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-    )
-    st.plotly_chart(fig, use_container_width=True, key=f"class_explorer_{class_a}_{class_b}")
+    st.caption(class_caption(class_a, row_a))
+    if row_b is not None:
+        st.caption(class_caption(class_b, row_b))
+
+    tab_boost, tab_growth = st.tabs(["Stat Boosts (flat)", "Growth Rate Modifiers (per level-up)"])
+
+    with tab_boost:
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=CLASS_CHART_STATS, y=[row_a[s] for s in CLASS_CHART_STATS], name=class_a))
+        if row_b is not None:
+            fig.add_trace(go.Bar(x=CLASS_CHART_STATS, y=[row_b[s] for s in CLASS_CHART_STATS], name=class_b))
+
+        all_values = [row_a[s] for s in CLASS_CHART_STATS] + ([row_b[s] for s in CLASS_CHART_STATS] if row_b is not None else [])
+        y_min = min(min(all_values), 0) * 1.2 if min(all_values) < 0 else 0
+        y_max = max(max(all_values), 1) * 1.25
+        fig.update_layout(
+            barmode="group",
+            height=420,
+            margin=dict(l=0, r=0, t=60, b=0),
+            yaxis_title="Stat boost (flat, one-time)",
+            yaxis=dict(range=[y_min, y_max]),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f"class_explorer_boost_{class_a}_{class_b}")
+
+    with tab_growth:
+        growth_a = class_growth_lookup.get(class_a, {})
+        if not growth_a:
+            st.caption(f"No growth-rate modifier data on file for {class_a}.")
+        else:
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=STAT_COLS, y=[growth_a.get(s, 0) for s in STAT_COLS], name=class_a))
+            all_values = [growth_a.get(s, 0) for s in STAT_COLS]
+            if row_b is not None:
+                growth_b = class_growth_lookup.get(class_b, {})
+                if growth_b:
+                    fig.add_trace(go.Bar(x=STAT_COLS, y=[growth_b.get(s, 0) for s in STAT_COLS], name=class_b))
+                    all_values += [growth_b.get(s, 0) for s in STAT_COLS]
+            y_min = min(min(all_values), 0) * 1.2 if min(all_values) < 0 else 0
+            y_max = max(max(all_values), 1) * 1.25
+            fig.update_layout(
+                barmode="group",
+                height=420,
+                margin=dict(l=0, r=0, t=60, b=0),
+                yaxis_title="Growth-rate modifier (percentage points per level-up)",
+                yaxis=dict(range=[y_min, y_max]),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            )
+            st.plotly_chart(fig, use_container_width=True, key=f"class_explorer_growth_{class_a}_{class_b}")
+            st.caption(
+                "Added to the character's own personal growth rate on every level-up spent in this "
+                "class - e.g. a class with +15% Str here means +0.15 expected Str per level, on top "
+                "of whatever the character's own Str growth rate already contributes."
+            )
 
 
 def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
-                          weapon_req_df, character_weapon_talent_df, starting_level_df, playable_names, dlc_names):
+                          weapon_req_df, character_weapon_talent_df, starting_level_df, class_growth_df,
+                          playable_names, dlc_names):
     st.caption(
         "Pick a character and see a recommended class path - either toward their "
         "natural strengths, or a role you choose. Only classes that character can "
@@ -401,7 +482,9 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
         eligibility_df=eligibility_df, character_gender_df=character_gender_df,
         weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
         starting_level_df=starting_level_df, include_dlc_classes=include_dlc_classes,
+        class_growth_df=class_growth_df,
     )
+    class_growth_lookup = load_class_growth_lookup(class_growth_df)
 
     col_portrait, col_info = st.columns([1, 5])
     with col_portrait:
@@ -427,6 +510,8 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
                 f"Target level {result['requested_target_level']} is below their join level - "
                 f"projecting to level {result['expected_stats_at_level']} instead."
             )
+        if result.get("weapon_switch_warning"):
+            st.warning(result["weapon_switch_warning"], icon="⚠️")
 
     if not result["path"]:
         st.warning("No class path could be built - check that class_stat_boosts.csv has data for all tiers.")
@@ -443,7 +528,8 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
 
     selected_path = render_path_with_mixmatch(
         result["path"], character, stat_boosts_df, eligibility_lookup, character_gender,
-        role_weights, weapon_req_lookup, include_dlc_classes=include_dlc_classes,
+        role_weights, result["role_used"], weapon_req_lookup, class_growth_lookup,
+        include_dlc_classes=include_dlc_classes,
     )
     final_class = selected_path[-1]
 
@@ -455,6 +541,7 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
         final_stats = stats_for_class_at_level(
             character, final_class, base_stats_df, growth_rates_df, stat_boosts_df,
             effective_level, start_level=result["join_level"],
+            class_growth_lookup=class_growth_lookup,
         )
     base_level_label = f"Join Level {result['join_level']}" if result["join_level"] > 1 else "Level 1"
     render_stat_charts(
@@ -485,14 +572,18 @@ def _import_build(character, result, selected_path, final_class, final_stats):
     Streamlit pattern for "this button press should affect what the rest of
     the app renders on the very next run."
     """
-    path = result["path"]
-    if selected_path != [step["class"] for step in path]:
-        # A mix-and-match override was in play - only the final/deepest tier
-        # actually feeds stats in-game (see render_path_with_mixmatch), so
-        # rewrite just that last step to reflect the user's actual choice
-        # rather than importing the tool's original recommendation instead
-        # of what's on screen.
-        path = path[:-1] + [{**path[-1], "class": final_class, "is_unique_class": False}]
+    # Rewrite EVERY tier where the user's mix-and-match selection differs
+    # from the tool's own recommendation, not just the final/deepest one -
+    # only the final tier's class feeds the stat projection in-game (see
+    # render_path_with_mixmatch), but the Team Builder tab still displays
+    # the whole path, so importing only the last override left every
+    # earlier-tier override silently reverted back to the recommendation
+    # the instant it was imported (the reported "imported build isn't the
+    # same as when it was imported" bug).
+    path = [
+        {**step, "class": choice, "is_unique_class": False} if choice != step["class"] else step
+        for step, choice in zip(result["path"], selected_path)
+    ]
     imported = st.session_state.setdefault("imported_builds", {})
     imported[character] = {
         "path": path,
@@ -504,7 +595,7 @@ def _import_build(character, result, selected_path, final_class, final_stats):
 
 def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
                      weapon_req_df, character_weapon_talent_df, recruitment_requirements_df, starting_level_df,
-                     playable_names, dlc_names):
+                     class_growth_df, playable_names, dlc_names):
     st.caption(
         "Builds a balanced team from a candidate pool by covering complementary "
         "roles, rather than just stacking the strongest individuals."
@@ -547,6 +638,13 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
                  "recruitable this way. Has no effect on 'Full roster'.",
         )
 
+    force_deployments = st.checkbox(
+        "Force-deploy Byleth and the route's own lord", value=True, key="team_force_deployments",
+        help="On a real route, the game doesn't let you leave Byleth or that route's house leader off the "
+             "roster - on by default so the recommended team matches what's actually buildable. Turn off "
+             "to build purely from fit scoring instead, ignoring who's actually forced onto the roster.",
+    )
+
     recruitment_lookup = load_recruitment_lookup(recruitment_requirements_df)
     candidates = get_candidate_pool(
         base_stats_df, playable_names, route=None if route_choice == "Full roster" else route_choice,
@@ -557,15 +655,15 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
         base_stats_df, candidates, None if route_choice == "Full roster" else route_choice,
     )
 
-    # Byleth and this route's own lord are force-deployed story units on
-    # their route - the game doesn't let you leave them off the team, so
-    # they're always included and can't be excluded (see
-    # mandatory_names_for_route). No effect on "Full roster", which has no
-    # single lord.
-    mandatory = [n for n in mandatory_names_for_route(route_choice) if n in candidates]
+    # Byleth (always) and this route's own lord (on a real route) are
+    # force-deployed story units - the game doesn't let you leave them off
+    # the roster, so they're included and can't be excluded whenever
+    # force_deployments is on (see mandatory_names_for_route). Turning the
+    # toggle off drops this entirely, building from fit scoring alone.
+    mandatory = [n for n in mandatory_names_for_route(route_choice) if n in candidates] if force_deployments else []
     if mandatory:
         st.caption(
-            "🔒 Force-deployed on this route, always included: "
+            "🔒 Force-deployed, always included: "
             + ", ".join(display_name(n, dlc_names) for n in mandatory)
         )
 
@@ -626,7 +724,8 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
             recruitment_lookup=recruitment_lookup, cross_house_names=cross_house_names,
             weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
             starting_level_df=starting_level_df, include_dlc_classes=include_dlc_classes,
-            locked_builds=imported_builds,
+            locked_builds=imported_builds, class_growth_df=class_growth_df,
+            force_deployed=set(mandatory),
         )
         # Persisted in session_state rather than only a local variable: Streamlit reruns this whole
         # function on ANY widget interaction, not just the two build buttons above (e.g. touching the
@@ -653,6 +752,7 @@ def main():
     (
         base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
         weapon_req_df, character_weapon_talent_df, recruitment_requirements_df, starting_level_df,
+        class_growth_df,
     ) = load_data()
     playable_names = get_playable_names(base_stats_df)
     dlc_names = get_dlc_names(base_stats_df)
@@ -663,16 +763,17 @@ def main():
     with tab1:
         render_character_tab(
             base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
-            weapon_req_df, character_weapon_talent_df, starting_level_df, playable_names, dlc_names,
+            weapon_req_df, character_weapon_talent_df, starting_level_df, class_growth_df,
+            playable_names, dlc_names,
         )
     with tab2:
         render_team_tab(
             base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
             weapon_req_df, character_weapon_talent_df, recruitment_requirements_df, starting_level_df,
-            playable_names, dlc_names,
+            class_growth_df, playable_names, dlc_names,
         )
     with tab3:
-        render_class_explorer_tab(stat_boosts_df, weapon_req_df)
+        render_class_explorer_tab(stat_boosts_df, weapon_req_df, class_growth_df)
 
 
 if __name__ == "__main__":

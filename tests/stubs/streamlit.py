@@ -70,8 +70,12 @@ def info(x):
     pass
 
 
-def warning(x):
+def warning(x, icon=None):
     print("st.warning:", x)
+
+
+def success(x, icon=None):
+    print("st.success:", x)
 
 
 def error(x):

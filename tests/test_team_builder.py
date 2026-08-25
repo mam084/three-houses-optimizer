@@ -274,9 +274,12 @@ class TestRouteSweep(unittest.TestCase):
 
 
 class TestMandatoryNames(unittest.TestCase):
-    def test_full_roster_has_no_mandatory_names(self):
-        self.assertEqual(mandatory_names_for_route("Full roster"), [])
-        self.assertEqual(mandatory_names_for_route(None), [])
+    def test_full_roster_still_forces_protagonist_but_no_lord(self):
+        # Byleth (the Protagonist) is force-deployed on every route, including
+        # "Full roster"/None - there's no route on which they're actually
+        # benchable - but a mixed-route roster has no single lord to force.
+        self.assertEqual(mandatory_names_for_route("Full roster"), ["Protagonist"])
+        self.assertEqual(mandatory_names_for_route(None), ["Protagonist"])
 
     def test_each_real_route_forces_protagonist_and_its_own_lord(self):
         for route in REAL_ROUTES:
@@ -298,6 +301,30 @@ class TestMandatoryNames(unittest.TestCase):
         team_names = [m["character"] for m in team]
         for name in mandatory:
             self.assertIn(name, team_names)
+
+    def test_force_deployed_names_get_force_deployed_why_text_not_by_request(self):
+        # "Force deployments currently say they're on the team 'by request'
+        # - should say they're force deployed" - the original report.
+        route = "Golden Deer"
+        candidates = get_candidate_pool(BASE_STATS_DF, PLAYABLE_NAMES, route=route)
+        mandatory = mandatory_names_for_route(route)
+        team = build_balanced_team(
+            candidates, GROWTH_RATES_DF, team_size=4, must_include=mandatory, force_deployed=set(mandatory),
+        )
+        by_name = {m["character"]: m for m in team}
+        for name in mandatory:
+            self.assertIn("Force-deployed", by_name[name]["why"])
+            self.assertNotIn("Included by request", by_name[name]["why"])
+
+    def test_a_plain_must_include_name_still_says_by_request(self):
+        route = "Golden Deer"
+        candidates = get_candidate_pool(BASE_STATS_DF, PLAYABLE_NAMES, route=route)
+        team = build_balanced_team(
+            candidates, GROWTH_RATES_DF, team_size=4, must_include=["Lysithea"], force_deployed=set(),
+        )
+        by_name = {m["character"]: m for m in team}
+        self.assertIn("Included by request", by_name["Lysithea"]["why"])
+        self.assertNotIn("Force-deployed", by_name["Lysithea"]["why"])
 
 
 class TestLockedBuilds(unittest.TestCase):

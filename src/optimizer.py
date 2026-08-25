@@ -120,6 +120,21 @@ UNIQUE_CLASS_SCORE_BONUS = 8.0
 # where the stat data already has a clear, better-fitting answer.
 WEAPON_PROFICIENCY_BONUS = 0.5
 
+# Small score bonus/penalty for how a class's growth-RATE modifiers (not
+# just its flat one-time stat boost - see data/class_growth_rates.csv and
+# load_class_growth_lookup) line up with a role's priorities, and a
+# separate penalty for asking a character to adopt a weapon type they've
+# never trained anywhere in the path so far or at the start (see
+# weapon_switch_penalty). Both intentionally small relative to a class's
+# own stat-boost score (usually several points) and to
+# UNIQUE_CLASS_SCORE_BONUS above - calibrated (see
+# TestGrowthRateScoringDoesNotDestabilizeExistingPicks in
+# tests/test_optimizer.py) so they refine which class wins a genuinely
+# close tier and surface a real in-game cost, without overriding a tier
+# where the stat-boost data already gives a clear, better-fitting answer.
+GROWTH_RATE_SCORE_WEIGHT = 0.05
+WEAPON_SWITCH_PENALTY = 0.6
+
 
 def reachable_tiers(target_level: int, tiers: list[str] = TIER_ORDER) -> list[str]:
     """
@@ -333,6 +348,94 @@ def weapon_growth_bonus(
         return 0.0
     required_skills = {skill for skill, _ in info["requirements"]}
     return WEAPON_PROFICIENCY_BONUS if required_skills & character_proficiency else 0.0
+
+
+def weapon_switch_penalty(
+    class_name: str,
+    weapon_req_lookup: dict | None,
+    accumulated_skills: set,
+    original_proficiency: set | None,
+) -> float:
+    """
+    WEAPON_SWITCH_PENALTY if class_name's certification asks for a skill
+    type neither the character started with (original_proficiency) NOR
+    appeared anywhere earlier in the path so far (accumulated_skills),
+    else 0.0. Respects the requirement's AND/OR shape
+    (weapon_req_lookup's "requirement_type" - see
+    load_weapon_requirements_lookup): an OR requirement (e.g. "Sword B or
+    Axe C") only needs ONE listed skill already known to count as a
+    non-switch, but an AND requirement (e.g. Wyvern Lord's "Lance C and
+    Axe A and Flying A") needs EVERY listed skill already known - already
+    knowing Axe from an earlier tier doesn't make picking up Lance AND
+    Flying, at A rank, for the first time at Master tier a free switch.
+    Getting this AND/OR distinction right is exactly what "weapon
+    requirements aren't weighted well - Catherine going Swordmaster to
+    Wyvern Lord is very difficult in practice" needed: an earlier version
+    of this check treated "any overlap at all" as safe for every class
+    regardless of AND/OR, so Catherine's genuinely rough Sword ->
+    Lance/Axe/Flying jump at Wyvern Lord went unflagged the moment an
+    earlier, unrelated tier happened to touch Axe (see
+    test_catherine_swordmaster_to_wyvern_lord_flags_the_real_complaint).
+
+    Checking BOTH accumulated_skills and original_proficiency (not just
+    accumulated_skills) matters too: an early, unrelated detour picked
+    purely for its stats shouldn't count as "already knows this weapon
+    type" any more than never having touched it at all would.
+
+    In the real game, training a brand-new weapon proficiency this late
+    is a real practical cost the flat per-tier stat-boost score doesn't
+    otherwise reflect at all.
+    """
+    if not weapon_req_lookup:
+        return 0.0
+    info = weapon_req_lookup.get(class_name)
+    if info is None:
+        return 0.0
+    required_skills = {skill for skill, _ in info["requirements"]}
+    if not required_skills:
+        return 0.0
+    known = set(accumulated_skills) | set(original_proficiency or [])
+    if info.get("requirement_type") == "AND":
+        is_switch = not required_skills.issubset(known)
+    else:
+        is_switch = not (required_skills & known)
+    return WEAPON_SWITCH_PENALTY if is_switch else 0.0
+
+
+def load_class_growth_lookup(class_growth_df: pd.DataFrame | None) -> dict:
+    """
+    Index data/class_growth_rates.csv by class name -> {stat: modifier}
+    (percentage points, additive on top of the character's own personal
+    growth rate on every level-up - a real, separate Three Houses
+    mechanic from a class's one-time flat certification stat boost in
+    class_stat_boosts.csv; see that CSV's own header and
+    https://serenesforest.net/three-houses/classes/growth-rates/).
+
+    Returns {} if class_growth_df is None - callers degrade to today's
+    "growth rates aren't modeled per-class" behavior rather than failing.
+    """
+    if class_growth_df is None:
+        return {}
+    lookup = {}
+    for _, row in class_growth_df.iterrows():
+        lookup[row["name"]] = {stat: row[stat] for stat in STAT_COLS if stat in row.index}
+    return lookup
+
+
+def score_growth_for_role(growth_mod_row: dict, role_weights: dict) -> float:
+    """
+    Dot product of a class's growth-RATE modifiers (percentage points, see
+    load_class_growth_lookup) with a role's weight profile - the
+    growth-rate analogue of score_class_for_role, letting a class's
+    compounding stat growth, not just its flat one-time boost, factor
+    into which class actually gets recommended. Scaled down by
+    GROWTH_RATE_SCORE_WEIGHT wherever it's used - see that constant.
+    """
+    score = 0.0
+    for stat, weight in role_weights.items():
+        if stat in STAT_COLS:
+            score += growth_mod_row.get(stat, 0) * weight
+    return score
 
 
 def primary_stats_for_role(role_weights: dict) -> list[str]:
@@ -688,11 +791,25 @@ def recommend_path(
     weapon_req_lookup: dict | None = None,
     character_proficiency: set | None = None,
     include_dlc_classes: bool = False,
+    class_growth_lookup: dict | None = None,
 ) -> list[dict]:
     """
     For a target role, pick the best-fitting class at each tier in order.
     Returns a list of {"tier": ..., "class": ..., "score": ..., "why": ...,
-    "requirement": ..., "is_unique_class": ...} dicts.
+    "requirement": ..., "is_unique_class": ..., "weapon_switch_warning":
+    ...} dicts.
+
+    class_growth_lookup (see load_class_growth_lookup), if given, factors
+    each candidate's growth-RATE modifiers into its score (see
+    score_growth_for_role/GROWTH_RATE_SCORE_WEIGHT) alongside its flat
+    stat boost, and every tier's certification requirement is checked
+    against a running "skills used so far in this path" set (seeded from
+    character_proficiency): a class that needs a weapon type foreign to
+    both the character's own starting proficiency and everything picked
+    earlier in the path takes a WEAPON_SWITCH_PENALTY and that step's
+    "weapon_switch_warning" is set True (see weapon_switch_penalty) -
+    "weapon requirements aren't weighted well" (e.g. Swordmaster into
+    Wyvern Lord) is exactly this case.
 
     If target_level is given, the path is truncated to only tiers reachable
     at that level (see TIER_LEVEL_REQUIREMENTS / reachable_tiers) - e.g. a
@@ -735,6 +852,13 @@ def recommend_path(
         eligible_unique_story_class_by_tier(character_name, eligibility_lookup, character_gender)
         if check_eligibility else {}
     )
+
+    # Skills required (by weapon-type certification) by whatever's actually
+    # been picked so far in this path, plus the character's own starting
+    # proficiency - see weapon_switch_penalty. Updated after each tier's
+    # pick, in path order, so a later tier's penalty check reflects the
+    # path actually built, not a hypothetical.
+    accumulated_skills = set(character_proficiency or [])
 
     for tier in reachable:
         tier_classes = stat_boosts_df[stat_boosts_df["tier"] == tier]
@@ -781,9 +905,13 @@ def recommend_path(
         rest = restrict_to_primary_relevant(rest, role_weights)
         tier_classes = pd.concat([rest, unique_row_df]) if not unique_row_df.empty else rest
 
-        def score_row(row, unique_class_name=unique_class_name):
+        def score_row(row, unique_class_name=unique_class_name, accumulated_skills=frozenset(accumulated_skills)):
             score = score_class_for_role(row, role_weights)
             score += weapon_growth_bonus(row["name"], weapon_req_lookup, character_proficiency)
+            if class_growth_lookup:
+                growth_mod = class_growth_lookup.get(row["name"], {})
+                score += score_growth_for_role(growth_mod, role_weights) * GROWTH_RATE_SCORE_WEIGHT
+            score -= weapon_switch_penalty(row["name"], weapon_req_lookup, accumulated_skills, character_proficiency)
             if row["name"] == unique_class_name:
                 score += UNIQUE_CLASS_SCORE_BONUS
             return score
@@ -793,6 +921,9 @@ def recommend_path(
         best_row = tier_classes.loc[best_idx]
         best_class = best_row["name"]
         is_unique_pick = unique_class_name is not None and best_class == unique_class_name
+        switch_warning = weapon_switch_penalty(
+            best_class, weapon_req_lookup, accumulated_skills, character_proficiency
+        ) > 0
 
         why = (
             f"{character_name}'s own unique class at this tier - their canonical path in the story, "
@@ -808,7 +939,12 @@ def recommend_path(
             "why": why,
             "requirement": format_requirement(best_class, weapon_req_lookup) if weapon_req_lookup else None,
             "is_unique_class": is_unique_pick,
+            "weapon_switch_warning": switch_warning,
         })
+
+        best_info = weapon_req_lookup.get(best_class) if weapon_req_lookup else None
+        if best_info:
+            accumulated_skills |= {skill for skill, _ in best_info["requirements"]}
 
     return path
 
@@ -939,6 +1075,105 @@ def expected_stats_at_level(
     return result
 
 
+def path_level_bands(
+    path: list[dict], target_level: int, start_level: int = 1,
+) -> list[tuple[str, str, int, int]]:
+    """
+    Split [start_level, target_level] into per-tier bands matching each
+    path step's own reachable window, so growth can be simulated with
+    each tier's own class along the way, rather than blended as if only
+    the final class had ever applied (see expected_stats_along_path).
+
+    A step's band starts at max(that tier's level requirement,
+    start_level) - never earlier than the character's own join level, if
+    later than the tier's normal unlock - and ends where the next step's
+    band starts (or at target_level, for the last step). A band that
+    would be empty after clamping (e.g. a character's join level already
+    skips past an early tier entirely) is omitted rather than yielding a
+    zero/negative-length entry.
+    """
+    if not path:
+        return []
+    bands = []
+    for i, step in enumerate(path):
+        band_start = max(TIER_LEVEL_REQUIREMENTS.get(step["tier"], 1), start_level)
+        if band_start > target_level:
+            continue
+        if i + 1 < len(path):
+            next_start = max(TIER_LEVEL_REQUIREMENTS.get(path[i + 1]["tier"], target_level), start_level)
+            band_end = min(next_start, target_level)
+        else:
+            band_end = target_level
+        if band_end <= band_start:
+            continue
+        bands.append((step["tier"], step["class"], band_start, band_end))
+    return bands
+
+
+def expected_stats_along_path(
+    path: list[dict],
+    base_row: dict,
+    growth_row: pd.Series,
+    final_class_boost_row: pd.Series,
+    class_growth_lookup: dict,
+    target_level: int = 30,
+    start_level: int = 1,
+) -> dict:
+    """
+    Like expected_stats_at_level, but applies each stat's growth using the
+    combined character-growth-rate + PER-TIER class growth-rate modifier
+    (see load_class_growth_lookup) for the levels actually spent in that
+    tier's class along the path (see path_level_bands), instead of a
+    single flat rate blended across the whole span. Classes really do
+    modify how fast a stat grows on every level-up in this game, not just
+    contribute a one-time flat boost - "tool says classes don't have
+    growth rates - this is very wrong" was the original report, and this
+    is the fix: growth gains are cumulative across every tier actually
+    spent on the way to target_level, since those level-ups already
+    happened, while the FINAL class's flat stat boost is still applied
+    only once at the end (boosts don't stack across a career path - that
+    part of the existing model is correct and unchanged).
+
+    base_row should be the character's stats at start_level already (see
+    base_stats_at_join_level) - this function only simulates growth
+    forward from there, it doesn't re-derive a level-1 baseline.
+
+    Falls back to expected_stats_at_level's flat-rate behavior (no
+    per-class growth modeling) if class_growth_lookup is empty/None or the
+    path yields no bands - e.g. an empty path, or every tier already
+    passed by start_level - so this stays backward compatible with
+    unmodeled classes/DLC rows not present in
+    data/class_growth_rates.csv.
+    """
+    bands = path_level_bands(path, target_level, start_level)
+    if not class_growth_lookup or not bands:
+        return expected_stats_at_level(base_row, growth_row, final_class_boost_row, target_level, start_level)
+
+    # Levels between start_level and the first tier's own band (e.g. 1-4,
+    # before Beginner's level-5 requirement) still happen - the character
+    # just hasn't reached their first real class yet (still Noble/Commoner,
+    # whose own growth-rate modifiers are ~0 - see data/class_growth_rates.csv),
+    # so they're simulated with the character's own growth rate alone
+    # rather than silently skipped (which would understate every stat by a
+    # few levels' worth of growth and break the "levels gained sums to
+    # target_level - start_level" invariant - see TestPathLevelBands).
+    pre_band_levels = max(bands[0][2] - start_level, 0)
+
+    result = {}
+    for stat in STAT_COLS:
+        value = float(base_row[stat]) + (float(growth_row[stat]) / 100) * pre_band_levels
+        for _tier, class_name, band_start, band_end in bands:
+            levels = band_end - band_start
+            if levels <= 0:
+                continue
+            class_growth = class_growth_lookup.get(class_name, {})
+            combined_rate = (float(growth_row[stat]) + class_growth.get(stat, 0)) / 100
+            value += combined_rate * levels
+        boost = final_class_boost_row[stat] if stat in final_class_boost_row.index else 0
+        result[stat] = round(value + boost, 1)
+    return result
+
+
 def stats_for_class_at_level(
     character_name: str,
     class_name: str,
@@ -947,17 +1182,26 @@ def stats_for_class_at_level(
     stat_boosts_df: pd.DataFrame,
     target_level: int = 30,
     start_level: int = 1,
+    class_growth_lookup: dict | None = None,
 ) -> dict | None:
     """
     Expected stats for character_name at target_level, if their current
     class were class_name specifically - the same expected-value
     calculation recommend_for_character uses for its recommended final
-    class (see expected_stats_at_level), just callable for any class the
-    user picks by hand. Powers the "mix and match" path override in the
-    UI: swap in a different class at whichever tier you'd actually end on,
-    and see the resulting projection, not just the tool's own top pick.
+    class, just callable for any class the user picks by hand. Powers the
+    "mix and match" path override in the UI: swap in a different class at
+    whichever tier you'd actually end on, and see the resulting
+    projection, not just the tool's own top pick.
+
     start_level should be the character's own join level when known (see
-    load_starting_level_lookup) - passed through to expected_stats_at_level.
+    load_starting_level_lookup). class_growth_lookup (see
+    load_class_growth_lookup), if given, applies class_name's own
+    growth-rate modifiers across the whole start_level..target_level span
+    (treating it as "if this had been their class the entire time," the
+    same assumption stats_for_class_at_level already makes about the flat
+    boost) instead of the character's raw growth rate alone; omit for the
+    old flat-rate-only behavior.
+
     Returns None if class_name isn't in stat_boosts_df at all.
     """
     boost_rows = stat_boosts_df[stat_boosts_df["name"] == class_name]
@@ -965,6 +1209,12 @@ def stats_for_class_at_level(
         return None
     base_row = base_stats_df[base_stats_df["name"] == character_name].iloc[0]
     growth_row = growth_rates_df[growth_rates_df["name"] == character_name].iloc[0]
+    if class_growth_lookup:
+        class_growth = class_growth_lookup.get(class_name, {})
+        combined_growth = growth_row[STAT_COLS].astype(float).copy()
+        for stat in STAT_COLS:
+            combined_growth[stat] = combined_growth[stat] + class_growth.get(stat, 0)
+        return expected_stats_at_level(base_row, combined_growth, boost_rows.iloc[0], target_level, start_level)
     return expected_stats_at_level(base_row, growth_row, boost_rows.iloc[0], target_level, start_level)
 
 
@@ -981,11 +1231,19 @@ def recommend_for_character(
     character_weapon_talent_df: pd.DataFrame | None = None,
     starting_level_df: pd.DataFrame | None = None,
     include_dlc_classes: bool = False,
+    class_growth_df: pd.DataFrame | None = None,
 ) -> dict:
     """
     Full recommendation for one character: auto-detects a role if none is
     given, builds a class path toward it, and estimates expected stats at
-    target_level in the recommended final class.
+    target_level by simulating growth tier-by-tier along that whole path
+    (see expected_stats_along_path), not just from the final class alone.
+
+    class_growth_df (data/class_growth_rates.csv), if given, supplies each
+    class's own growth-RATE modifiers (see load_class_growth_lookup) -
+    both to nudge which class gets recommended at each tier (see
+    recommend_path's class_growth_lookup) and to the stat projection
+    itself. Omit for the old flat-character-growth-only behavior.
 
     If eligibility_df (data/class_eligibility.csv) is given, both the
     recommended path and the auxiliary "eligible_unique_classes" list
@@ -1033,6 +1291,8 @@ def recommend_for_character(
     effective_target_level = max(target_level, join_level)
     base_stats_at_join = base_stats_at_join_level(base_row, growth_row, join_level)
 
+    class_growth_lookup = load_class_growth_lookup(class_growth_df)
+
     path = recommend_path(
         stat_boosts_df, used_role, target_level=effective_target_level,
         character_name=character_name,
@@ -1041,14 +1301,26 @@ def recommend_for_character(
         weapon_req_lookup=weapon_req_lookup,
         character_proficiency=character_proficiency,
         include_dlc_classes=include_dlc_classes,
+        class_growth_lookup=class_growth_lookup,
     )
     final_class_name = path[-1]["class"] if path else None
 
     final_stats = None
     if final_class_name:
         final_boost_row = stat_boosts_df[stat_boosts_df["name"] == final_class_name].iloc[0]
-        final_stats = expected_stats_at_level(
-            base_row, growth_row, final_boost_row, effective_target_level, start_level=join_level,
+        final_stats = expected_stats_along_path(
+            path, base_stats_at_join, growth_row, final_boost_row, class_growth_lookup,
+            effective_target_level, start_level=join_level,
+        )
+
+    weapon_switch_warning = None
+    flagged_steps = [step for step in path if step.get("weapon_switch_warning")]
+    if flagged_steps:
+        names = ", ".join(f"{step['tier']} ({step['class']})" for step in flagged_steps)
+        weapon_switch_warning = (
+            f"This path asks {character_name} to pick up a weapon type they've never trained - "
+            f"at {names} - which is a slow, costly switch in practice, not the free one the stat "
+            f"numbers alone would suggest."
         )
 
     unique_options = None
@@ -1070,6 +1342,7 @@ def recommend_for_character(
         "base_stats_at_join_level": base_stats_at_join,
         "expected_final_stats": final_stats,
         "eligible_unique_classes": unique_options,
+        "weapon_switch_warning": weapon_switch_warning,
     }
 
 
@@ -1082,6 +1355,7 @@ def main():
     weapon_req_df = pd.read_csv(DATA_DIR / "class_weapon_requirements.csv")
     character_weapon_talent_df = pd.read_csv(DATA_DIR / "character_weapon_talent.csv")
     starting_level_df = pd.read_csv(DATA_DIR / "character_starting_level.csv")
+    class_growth_df = pd.read_csv(DATA_DIR / "class_growth_rates.csv")
 
     import argparse
     parser = argparse.ArgumentParser(description="Recommend a Three Houses class path for a character.")
@@ -1101,6 +1375,7 @@ def main():
         eligibility_df=eligibility_df, character_gender_df=character_gender_df,
         weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
         starting_level_df=starting_level_df, include_dlc_classes=args.include_dlc_classes,
+        class_growth_df=class_growth_df,
     )
 
     print(f"\n{result['character']}")
@@ -1124,6 +1399,8 @@ def main():
             print(f"  {'':>13}  -> {step['why']}")
         print(f"Expected stats at level {result['expected_stats_at_level']} as {result['path'][-1]['class']}:")
         print(f"  {result['expected_final_stats']}")
+        if result["weapon_switch_warning"]:
+            print(f"⚠ {result['weapon_switch_warning']}")
 
     if result["eligible_unique_classes"]:
         print("Also eligible for these Unique classes:")

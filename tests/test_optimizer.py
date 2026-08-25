@@ -29,24 +29,30 @@ from src.optimizer import (
     TIER_ORDER,
     UNIQUE_CLASS_SCORE_BONUS,
     UNIQUE_STORY_CLASS_TIER,
+    WEAPON_SWITCH_PENALTY,
     apply_weapon_affinity_fallback,
     base_stats_at_join_level,
     compute_roster_stat_stats,
     detect_natural_role,
     eligible_unique_story_class_by_tier,
+    expected_stats_along_path,
     format_requirement,
     is_class_eligible,
     list_eligible_classes_at_tier,
     load_character_proficiency_lookup,
+    load_class_growth_lookup,
     load_eligibility_lookup,
     load_starting_level_lookup,
     load_weapon_requirements_lookup,
+    path_level_bands,
     reachable_tiers,
     recommend_for_character,
     recommend_path,
     restrict_support_to_magic_classes,
+    score_growth_for_role,
     stats_for_class_at_level,
     weapon_growth_bonus,
+    weapon_switch_penalty,
 )
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -67,10 +73,12 @@ CHARACTER_WEAPON_TALENT_DF = pd.read_csv(DATA_DIR / "character_weapon_talent.csv
 PLAYABLE_NAMES = sorted(n for n in BASE_STATS_DF["name"] if "(NPC)" not in n)
 
 STARTING_LEVEL_DF = pd.read_csv(DATA_DIR / "character_starting_level.csv")
+CLASS_GROWTH_DF = pd.read_csv(DATA_DIR / "class_growth_rates.csv")
 WEAPON_REQ_LOOKUP = load_weapon_requirements_lookup(WEAPON_REQ_DF)
 PROFICIENCY_LOOKUP = load_character_proficiency_lookup(CHARACTER_WEAPON_TALENT_DF)
 ELIGIBILITY_LOOKUP = load_eligibility_lookup(ELIGIBILITY_DF)
 STARTING_LEVEL_LOOKUP = load_starting_level_lookup(STARTING_LEVEL_DF)
+CLASS_GROWTH_LOOKUP = load_class_growth_lookup(CLASS_GROWTH_DF)
 ROSTER_MEANS, ROSTER_STDS = compute_roster_stat_stats(GROWTH_RATES_DF)
 
 
@@ -487,6 +495,243 @@ class TestDlcClasses(unittest.TestCase):
         )
         self.assertNotIn("Valkyrie", options)  # Female-locked
         self.assertIn("Trickster", options)  # unrestricted
+
+
+class TestClassGrowthRates(unittest.TestCase):
+    """
+    Coverage for data/class_growth_rates.csv and load_class_growth_lookup -
+    the "tool says classes don't have growth rates - this is very wrong"
+    report. Classes DO have their own growth-rate modifiers in Three
+    Houses, a separate mechanic from a class's one-time flat stat boost
+    (class_stat_boosts.csv) - see
+    https://serenesforest.net/three-houses/classes/growth-rates/.
+    """
+
+    def test_every_playable_class_has_growth_rate_data(self):
+        playable = STAT_BOOSTS_DF[~STAT_BOOSTS_DF["name"].str.contains(r"\(", regex=True)]
+        playable = playable[playable["tier"] != "NPC/Enemy"]
+        missing = sorted(set(playable["name"]) - set(CLASS_GROWTH_LOOKUP.keys()))
+        self.assertEqual(missing, [], f"missing growth-rate data for: {missing}")
+
+    def test_warrior_has_a_meaningful_positive_str_modifier(self):
+        # Warrior is a well-known Str/HP powerhouse class - a real, sourced
+        # modifier should show up here, not a placeholder zero.
+        self.assertGreater(CLASS_GROWTH_LOOKUP["Warrior"]["Str"], 0)
+
+    def test_score_growth_for_role_is_a_weighted_dot_product(self):
+        growth_mod = {"Str": 20, "Spd": 10, "Mag": -5}
+        score = score_growth_for_role(growth_mod, ROLE_PROFILES["Physical Attacker"])
+        # Physical Attacker weights Str 1.0, Spd 0.5 - Mag isn't weighted at all.
+        self.assertAlmostEqual(score, 20 * 1.0 + 10 * 0.5)
+
+    def test_score_growth_for_role_ignores_unweighted_stats(self):
+        growth_mod = {"Cha": 50}  # Cha isn't in any ROLE_PROFILES weight dict
+        self.assertEqual(score_growth_for_role(growth_mod, ROLE_PROFILES["Tank"]), 0.0)
+
+
+class TestPathLevelBands(unittest.TestCase):
+    def test_empty_path_returns_no_bands(self):
+        self.assertEqual(path_level_bands([], target_level=30), [])
+
+    def test_bands_cover_target_level_minus_start_level_total_levels(self):
+        # Regression test for an off-by-one bug where the last band's end
+        # used target_level + 1, double-counting a level-up. start_level=5
+        # matches Beginner's own level requirement, so there's no
+        # pre-first-tier gap to account for separately here (see
+        # TestExpectedStatsAlongPath for that gap-filling behavior).
+        path = [
+            {"tier": "Beginner", "class": "Fighter"},
+            {"tier": "Intermediate", "class": "Brigand"},
+            {"tier": "Advanced", "class": "Warrior"},
+            {"tier": "Master", "class": "War Master"},
+        ]
+        bands = path_level_bands(path, target_level=30, start_level=5)
+        total_levels = sum(end - start for _tier, _cls, start, end in bands)
+        self.assertEqual(total_levels, 30 - 5)
+
+    def test_bands_clamp_to_start_level_for_a_late_join(self):
+        # A character who joins at level 15 has already banked their
+        # Beginner-tier levels before they're recruitable - that band
+        # should be skipped entirely (clamped away). Intermediate absorbs
+        # levels 15-20 (Advanced isn't reachable until 20), so every level
+        # from start_level to target_level is still covered by exactly one
+        # tier's band - no gaps, no double-counting.
+        path = [
+            {"tier": "Beginner", "class": "Fighter"},
+            {"tier": "Intermediate", "class": "Brigand"},
+            {"tier": "Advanced", "class": "Warrior"},
+        ]
+        bands = path_level_bands(path, target_level=30, start_level=15)
+        tiers_covered = {tier for tier, _cls, _s, _e in bands}
+        self.assertNotIn("Beginner", tiers_covered)
+        self.assertIn("Intermediate", tiers_covered)
+        self.assertIn("Advanced", tiers_covered)
+        total_levels = sum(end - start for _tier, _cls, start, end in bands)
+        self.assertEqual(total_levels, 30 - 15)
+
+
+class TestExpectedStatsAlongPath(unittest.TestCase):
+    def test_falls_back_to_flat_rate_without_a_growth_lookup(self):
+        result = recommend_for_character(
+            "Bernadetta", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Physical Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+        )
+        without_growth = stats_for_class_at_level(
+            "Bernadetta", result["path"][-1]["class"], BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            target_level=30,
+        )
+        self.assertEqual(result["expected_final_stats"], without_growth)
+
+    def test_per_tier_class_growth_changes_the_projection(self):
+        result_flat = recommend_for_character(
+            "Bernadetta", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Physical Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+        )
+        result_with_growth = recommend_for_character(
+            "Bernadetta", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Physical Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            class_growth_df=CLASS_GROWTH_DF,
+        )
+        # Simulating each tier's own class growth modifier along the whole
+        # path (instead of flat character-growth-only) should change at
+        # least one projected stat - otherwise the projection isn't
+        # actually using the new data.
+        self.assertNotEqual(result_flat["expected_final_stats"], result_with_growth["expected_final_stats"])
+
+    def test_pre_first_tier_levels_still_accrue_the_characters_own_growth(self):
+        # Levels 1-4 (before Beginner's level-5 requirement) aren't covered
+        # by any path_level_bands entry, but they still happened - a
+        # character's own growth rate should still apply there, not be
+        # silently dropped (which would understate every projected stat
+        # and break the "total levels gained == target_level - start_level"
+        # invariant).
+        path = [{"tier": "Beginner", "class": "Fighter"}, {"tier": "Intermediate", "class": "Brigand"}]
+        base_row = BASE_STATS_DF[BASE_STATS_DF["name"] == "Caspar"].iloc[0]
+        growth_row = GROWTH_RATES_DF[GROWTH_RATES_DF["name"] == "Caspar"].iloc[0]
+        boost_row = STAT_BOOSTS_DF[STAT_BOOSTS_DF["name"] == "Brigand"].iloc[0]
+        stats_from_level_1 = expected_stats_along_path(
+            path, base_row, growth_row, boost_row, CLASS_GROWTH_LOOKUP, target_level=15, start_level=1,
+        )
+        stats_from_level_5 = expected_stats_along_path(
+            path, base_row.copy() if hasattr(base_row, "copy") else dict(base_row),
+            growth_row, boost_row, CLASS_GROWTH_LOOKUP, target_level=15, start_level=5,
+        )
+        # Starting the simulation from level 1 (four extra levels of the
+        # character's own growth before Beginner even unlocks) should
+        # project HIGHER stats than starting from level 5 with the same
+        # base_row - if the pre-band gap were silently dropped, the two
+        # would come out identical.
+        self.assertNotEqual(stats_from_level_1, stats_from_level_5)
+
+    def test_every_stat_column_present_in_a_path_wide_projection(self):
+        path = [{"tier": "Beginner", "class": "Fighter"}, {"tier": "Intermediate", "class": "Brigand"}]
+        base_row = BASE_STATS_DF[BASE_STATS_DF["name"] == "Caspar"].iloc[0]
+        growth_row = GROWTH_RATES_DF[GROWTH_RATES_DF["name"] == "Caspar"].iloc[0]
+        boost_row = STAT_BOOSTS_DF[STAT_BOOSTS_DF["name"] == "Brigand"].iloc[0]
+        stats = expected_stats_along_path(
+            path, base_row, growth_row, boost_row, CLASS_GROWTH_LOOKUP, target_level=15, start_level=1,
+        )
+        self.assertEqual(set(stats.keys()), set(STAT_COLS))
+
+
+class TestWeaponSwitchPenalty(unittest.TestCase):
+    def test_or_requirement_is_satisfied_by_any_one_known_skill(self):
+        # Fighter's Beginner requirement is "Axe D or Bow D or Brawling D" -
+        # an OR - so already knowing just Axe should be enough.
+        penalty = weapon_switch_penalty(
+            "Fighter", WEAPON_REQ_LOOKUP, accumulated_skills=set(), original_proficiency={"Axe"},
+        )
+        self.assertEqual(penalty, 0.0)
+
+    def test_and_requirement_needs_every_listed_skill_known(self):
+        # Wyvern Lord requires Lance C AND Axe A AND Flying A - knowing only
+        # Axe from earlier in the path isn't enough to call this a
+        # non-switch; Lance and Flying are still both brand new.
+        penalty = weapon_switch_penalty(
+            "Wyvern Lord", WEAPON_REQ_LOOKUP, accumulated_skills={"Axe"}, original_proficiency={"Sword"},
+        )
+        self.assertEqual(penalty, WEAPON_SWITCH_PENALTY)
+
+    def test_and_requirement_satisfied_once_every_skill_is_known(self):
+        penalty = weapon_switch_penalty(
+            "Wyvern Lord", WEAPON_REQ_LOOKUP,
+            accumulated_skills={"Axe", "Lance", "Flying"}, original_proficiency=None,
+        )
+        self.assertEqual(penalty, 0.0)
+
+    def test_unknown_class_has_no_penalty(self):
+        self.assertEqual(
+            weapon_switch_penalty("Not A Real Class", WEAPON_REQ_LOOKUP, set(), None), 0.0,
+        )
+
+    def test_catherine_swordmaster_to_wyvern_lord_flags_the_real_complaint(self):
+        # The original report: "weapon requirements aren't weighted well -
+        # Catherine going Swordmaster to Wyvern Lord is very difficult in
+        # practice". Catherine's own starting proficiency is Sword only -
+        # Wyvern Lord's Lance/Axe/Flying (AND) requirement should be
+        # flagged as a real weapon-type switch, whatever detour the rest
+        # of her path took first.
+        result = recommend_for_character(
+            "Catherine", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Physical Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            class_growth_df=CLASS_GROWTH_DF,
+        )
+        master_step = next(s for s in result["path"] if s["tier"] == "Master")
+        self.assertEqual(master_step["class"], "Wyvern Lord")
+        self.assertTrue(master_step["weapon_switch_warning"])
+        self.assertIsNotNone(result["weapon_switch_warning"])
+        self.assertIn("Wyvern Lord", result["weapon_switch_warning"])
+
+
+class TestGrowthRateScoringDoesNotDestabilizeExistingPicks(unittest.TestCase):
+    """
+    GROWTH_RATE_SCORE_WEIGHT is deliberately small so factoring growth
+    rates into which class gets recommended (see recommend_path's
+    class_growth_lookup) refines close calls without overriding a tier
+    where the stat-boost data already gives a clear answer - these guard
+    the specific recommendations other tests already pin down.
+    """
+
+    def test_edelgard_physical_attacker_still_uses_her_own_unique_classes_with_growth_scoring(self):
+        result = recommend_for_character(
+            "Edelgard", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Physical Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
+        )
+        by_tier = {step["tier"]: step["class"] for step in result["path"]}
+        self.assertEqual(by_tier["Advanced"], "Armored Lord")
+        self.assertEqual(by_tier["Master"], "Emperor")
+
+    def test_edelgard_recommended_path_still_has_no_gremory_with_growth_scoring(self):
+        result = recommend_for_character(
+            "Edelgard", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            target_level=30, eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            class_growth_df=CLASS_GROWTH_DF,
+        )
+        classes_in_path = [step["class"] for step in result["path"]]
+        self.assertNotIn("Gremory", classes_in_path)
+
+    def test_full_roster_every_role_sweep_with_growth_scoring_raises_nothing(self):
+        for name in PLAYABLE_NAMES:
+            for role_name in list(ROLE_PROFILES.keys()) + [None]:
+                with self.subTest(character=name, role=role_name):
+                    result = recommend_for_character(
+                        name, BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+                        role_name=role_name, target_level=30,
+                        eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+                        weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+                        starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
+                    )
+                    self.assertIsInstance(result["path"], list)
 
 
 if __name__ == "__main__":
