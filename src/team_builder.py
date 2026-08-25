@@ -71,6 +71,33 @@ REAL_HOUSES = ["Black Eagles", "Blue Lions", "Golden Deer"]
 SILVER_SNOW_LOST_CHARACTERS = {"Edelgard", "Hubert"}
 DLC_HOUSE = "DLC-exclusive"
 
+# Byleth (the Protagonist) and each route's house leader are force-deployed
+# story units on their route - the game doesn't let you leave them off the
+# roster, so a "recommended team" that omits them isn't actually buildable.
+# Both Black Eagles routes share Edelgard as their lord (she's the one who
+# stays on both - see SILVER_SNOW_LOST_CHARACTERS for what Silver Snow
+# actually drops). "Full roster" has no single route/lord, so it's absent
+# here rather than mapped to anything.
+ROUTE_LORD = {
+    BLACK_EAGLES_CRIMSON_FLOWER: "Edelgard",
+    BLACK_EAGLES_SILVER_SNOW: "Edelgard",
+    "Blue Lions": "Dimitri",
+    "Golden Deer": "Claude",
+}
+
+
+def mandatory_names_for_route(route: str | None) -> list[str]:
+    """
+    Characters who must be on the team for `route` regardless of fit
+    scoring - the Protagonist and that route's house leader, both
+    force-deployed on their own route (see ROUTE_LORD). Returns [] for
+    "Full roster"/None, since there's no single lord a mixed-route roster
+    is forced to include.
+    """
+    if route is None or route == "Full roster" or route not in ROUTE_LORD:
+        return []
+    return ["Protagonist", ROUTE_LORD[route]]
+
 
 def get_candidate_pool(
     base_stats_df: pd.DataFrame,
@@ -438,33 +465,63 @@ def build_team_with_paths(
     cross_house_names: set | None = None,
     weapon_req_df: pd.DataFrame | None = None,
     character_weapon_talent_df: pd.DataFrame | None = None,
+    starting_level_df: pd.DataFrame | None = None,
+    include_dlc_classes: bool = False,
+    locked_builds: dict | None = None,
 ) -> list[dict]:
     """
     Like build_balanced_team, but also attaches each member's full class-path
     recommendation (reusing optimizer.recommend_for_character), so the team
     output is immediately useful rather than just a role assignment.
 
-    eligibility_df, character_gender_df, weapon_req_df and
-    character_weapon_talent_df are passed straight through to
-    recommend_for_character - see its docstring. All optional and default
-    to None (the corresponding feature disabled), for backward
-    compatibility with existing callers. must_include/exclude/rng/
-    recruitment_lookup/cross_house_names are passed straight through to
-    build_balanced_team - see its docstring (and cross_house_names_in_pool
-    for how to compute that last one from a get_candidate_pool result).
+    eligibility_df, character_gender_df, weapon_req_df,
+    character_weapon_talent_df, starting_level_df and include_dlc_classes
+    are passed straight through to recommend_for_character - see its
+    docstring. All optional and default to None/False (the corresponding
+    feature disabled), for backward compatibility with existing callers.
+    must_include/exclude/rng/recruitment_lookup/cross_house_names are
+    passed straight through to build_balanced_team - see its docstring
+    (and cross_house_names_in_pool for how to compute that last one from a
+    get_candidate_pool result).
+
+    locked_builds: {character_name: {"path", "final_class",
+    "expected_final_stats", "eligible_unique_classes"}} - for a character
+    with an entry here, that build is used as-is instead of calling
+    recommend_for_character, so a build the user hand-crafted elsewhere
+    (e.g. via "mix and match" in the Character Optimizer, then imported
+    into the Team Builder) is respected rather than silently recomputed
+    and overwritten. The character's role/score/why (from
+    build_balanced_team's own assignment) are unaffected - only the
+    path/stats are swapped in. Names in locked_builds that aren't must_include
+    still only appear on the team if build_balanced_team's own round-robin
+    picks them; pass them as must_include too if they should always be on
+    the team (see app.py's Team Builder tab).
     """
     team = build_balanced_team(
         candidates, growth_rates_df, team_size,
         must_include=must_include, exclude=exclude, rng=rng,
         recruitment_lookup=recruitment_lookup, cross_house_names=cross_house_names,
     )
+    locked_builds = locked_builds or {}
 
     for member in team:
+        locked = locked_builds.get(member["character"])
+        if locked is not None:
+            member["path"] = locked["path"]
+            member["final_class"] = locked.get("final_class") or (
+                locked["path"][-1]["class"] if locked["path"] else None
+            )
+            member["expected_final_stats"] = locked.get("expected_final_stats")
+            member["eligible_unique_classes"] = locked.get("eligible_unique_classes")
+            member["why"] = f"{member['why']} Using your own imported build from the Character Optimizer."
+            continue
+
         full_rec = recommend_for_character(
             member["character"], base_stats_df, growth_rates_df, stat_boosts_df,
             role_name=member["role"], target_level=target_level,
             eligibility_df=eligibility_df, character_gender_df=character_gender_df,
             weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
+            starting_level_df=starting_level_df, include_dlc_classes=include_dlc_classes,
         )
         member["path"] = full_rec["path"]
         member["final_class"] = full_rec["path"][-1]["class"] if full_rec["path"] else None
@@ -483,6 +540,7 @@ def main():
     weapon_req_df = pd.read_csv(DATA_DIR / "class_weapon_requirements.csv")
     character_weapon_talent_df = pd.read_csv(DATA_DIR / "character_weapon_talent.csv")
     recruitment_requirements_df = pd.read_csv(DATA_DIR / "recruitment_requirements.csv")
+    starting_level_df = pd.read_csv(DATA_DIR / "character_starting_level.csv")
 
     import argparse
     parser = argparse.ArgumentParser(description="Recommend a balanced Three Houses team.")
@@ -507,6 +565,9 @@ def main():
     parser.add_argument("--seed", type=int, default=None,
                          help="Random seed for weighted-random variety instead of always the top-scoring pick "
                               "per role. Omit for the original deterministic behavior.")
+    parser.add_argument("--include-dlc-classes", action="store_true",
+                         help="Also consider the Cindered Shadows certification classes as Advanced-tier "
+                              "options for every team member.")
     args = parser.parse_args()
 
     recruitment_lookup = load_recruitment_lookup(recruitment_requirements_df)
@@ -516,7 +577,11 @@ def main():
         include_cross_house_recruits=args.include_cross_house_recruits,
         target_level=args.target_level, recruitment_lookup=recruitment_lookup,
     )
-    must_include = [n.strip() for n in args.must_include.split(",")] if args.must_include else None
+    # Byleth and the route's own lord are force-deployed - always on the
+    # team for a real route, same as in-game (see mandatory_names_for_route).
+    mandatory = [n for n in mandatory_names_for_route(args.house) if n in candidates]
+    must_include = [n.strip() for n in args.must_include.split(",")] if args.must_include else []
+    must_include = list(dict.fromkeys(mandatory + must_include))  # mandatory first, de-duplicated
     exclude = [n.strip() for n in args.exclude.split(",")] if args.exclude else None
     rng = np.random.default_rng(args.seed) if args.seed is not None else None
     cross_house_names = cross_house_names_in_pool(base_stats_df, candidates, args.house)
@@ -525,9 +590,10 @@ def main():
         candidates, base_stats_df, growth_rates_df, stat_boosts_df, team_size=args.size,
         target_level=args.target_level,
         eligibility_df=eligibility_df, character_gender_df=character_gender_df,
-        must_include=must_include, exclude=exclude, rng=rng,
+        must_include=must_include or None, exclude=exclude, rng=rng,
         recruitment_lookup=recruitment_lookup, cross_house_names=cross_house_names,
         weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
+        starting_level_df=starting_level_df, include_dlc_classes=args.include_dlc_classes,
     )
 
     dlc_names = set(base_stats_df[base_stats_df["house"] == DLC_HOUSE]["name"])

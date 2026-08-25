@@ -1,0 +1,44 @@
+name,join_level,confidence,notes
+Protagonist,1,verified,Playable from the Ch1 prologue at level 1
+Sothis (NPC),1,verified,"Present from the start; NPC, not player-controlled"
+Edelgard,1,verified,"Black Eagles house student, playable from Ch1"
+Hubert,1,verified,"Black Eagles house student, playable from Ch1"
+Dorothea,1,verified,"Black Eagles house student, playable from Ch1"
+Ferdinand,1,verified,"Black Eagles house student, playable from Ch1"
+Bernadetta,1,verified,"Black Eagles house student, playable from Ch1"
+Caspar,1,verified,"Black Eagles house student, playable from Ch1"
+Petra,1,verified,"Black Eagles house student, playable from Ch1"
+Linhardt,1,verified,"Black Eagles house student, playable from Ch1"
+Dimitri,1,verified,"Blue Lions house student, playable from Ch1"
+Dedue,1,verified,"Blue Lions house student, playable from Ch1"
+Felix,1,verified,"Blue Lions house student, playable from Ch1"
+Mercedes,1,verified,"Blue Lions house student, playable from Ch1"
+Ashe,1,verified,"Blue Lions house student, playable from Ch1"
+Annette,1,verified,"Blue Lions house student, playable from Ch1"
+Sylvain,1,verified,"Blue Lions house student, playable from Ch1"
+Ingrid,1,verified,"Blue Lions house student, playable from Ch1"
+Claude,1,verified,"Golden Deer house student, playable from Ch1"
+Lorenz,1,verified,"Golden Deer house student, playable from Ch1"
+Hilda,1,verified,"Golden Deer house student, playable from Ch1"
+Raphael,1,verified,"Golden Deer house student, playable from Ch1"
+Lysithea,1,verified,"Golden Deer house student, playable from Ch1"
+Ignatz,1,verified,"Golden Deer house student, playable from Ch1"
+Marianne,1,verified,"Golden Deer house student, playable from Ch1"
+Leonie,1,verified,"Golden Deer house student, playable from Ch1"
+Rhea (NPC),1,verified,"Present from the start; NPC, not player-controlled"
+Manuela,20,approximate,Recruitable starting Month 11 per RPG Site's recruitment guide; mapped onto this project's own Byleth-level/month calibration (see recruitment_requirements.csv) rather than a directly-sourced level figure
+Hanneman,20,approximate,Recruitable starting Month 11 per RPG Site's recruitment guide; mapped onto this project's own Byleth-level/month calibration rather than a directly-sourced level figure
+Seteth,10,approximate,"Joins automatically at a route-dependent story point rather than a fixed level requirement; 10 is a rough Part-1 placeholder, not a sourced figure"
+Flayn,10,approximate,"Joins automatically at a route-dependent story point rather than a fixed level requirement; 10 is a rough Part-1 placeholder, not a sourced figure"
+Cyril,15,approximate,Recruitable starting Month 8 per RPG Site's recruitment guide; mapped onto this project's own Byleth-level/month calibration rather than a directly-sourced level figure
+Jeralt (NPC),1,verified,"Present from the start; NPC, not player-controlled"
+Catherine,15,approximate,Recruitable starting Month 7 per RPG Site's recruitment guide; mapped onto this project's own Byleth-level/month calibration rather than a directly-sourced level figure
+Alois,5,approximate,Recruitable starting Month 2 per RPG Site's recruitment guide; mapped onto this project's own Byleth-level/month calibration rather than a directly-sourced level figure
+Gilbert,10,approximate,"Joins automatically at a route-dependent story point rather than a fixed level requirement; 10 is a rough Part-1 placeholder, not a sourced figure"
+Shamir,20,approximate,Recruitable starting Month 9 per RPG Site's recruitment guide; mapped onto this project's own Byleth-level/month calibration rather than a directly-sourced level figure
+Yuri,1,unmodeled,"Ashen Wolves auto-scale to roughly match Byleth's own level when recruited rather than joining at a fixed level - no fixed floor is enforced (same ""doesn't simulate Byleth's own playthrough"" gap already documented for cross-house recruitment)"
+Balthus,1,unmodeled,Ashen Wolves auto-scale to roughly match Byleth's own level when recruited rather than joining at a fixed level - no fixed floor is enforced
+Constance,1,unmodeled,Ashen Wolves auto-scale to roughly match Byleth's own level when recruited rather than joining at a fixed level - no fixed floor is enforced
+Hapi,1,unmodeled,Ashen Wolves auto-scale to roughly match Byleth's own level when recruited rather than joining at a fixed level - no fixed floor is enforced
+Jeritza,20,approximate,"Hidden late-game recruit (automatic as of patch 1.10 per RPG Site); 20 is a rough placeholder for ""well into Part 2,"" not a directly-sourced figure"
+Anna,10,approximate,"DLC merchant recruit, starting Month 6 per RPG Site's recruitment guide; mapped onto this project's own Byleth-level/month calibration rather than a directly-sourced level figure"

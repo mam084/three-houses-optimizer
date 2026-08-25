@@ -57,6 +57,69 @@ TIER_LEVEL_REQUIREMENTS = {
     "Master": 30,
 }
 
+# class_stat_boosts.csv's tier value for the four Cindered Shadows
+# certification classes (Trickster, War Monk/Cleric, Dark Flier, Valkyrie).
+# These were sitting in the data entirely unused - not in TIER_ORDER, so
+# never considered by recommend_path, and not "Unique" tier either, so
+# never surfaced by eligible_unique_classes. Their real certification
+# requirements (data/class_weapon_requirements.csv) are B-rank pairs, the
+# same shape as Advanced-tier requirements (Hero: Sword B/Axe C, Swordmaster:
+# Sword A) rather than Master's usual A-rank-plus, so when a caller opts in
+# via include_dlc_classes, they're merged into the ADVANCED tier's candidate
+# pool specifically (see recommend_path / list_eligible_classes_at_tier) -
+# an approximation, not a sourced "this is officially an Advanced-tier
+# class" claim, since Cindered Shadows classes don't fit the base game's
+# tier ladder at all.
+DLC_CLASS_TIER = "DLC Exclusive"
+DLC_CLASS_MERGE_TIER = "Advanced"
+
+# Character-locked Unique-tier classes that DO map onto a specific rung of
+# the Beginner->Master ladder, per class_eligibility.csv's own unlock_note
+# text ("Edelgard's unique Advanced-tier class", "Byleth's unique
+# Master-tier class", etc.) - unlike Dancer/Noble/Commoner, which are Unique
+# tier but not a personal story-class endpoint for one character. Splicing
+# these into recommend_path (see below) answers "characters with unique
+# classes should have those incorporated as options, weighted higher" -
+# these seven are exactly the classes that are both (a) locked to one
+# specific character and (b) documented as replacing a named tier, so they
+# have a principled slot to go in, unlike Dancer (open to anyone, no fixed
+# tier) or Noble/Commoner (starting classes, not endpoints).
+UNIQUE_STORY_CLASS_TIER = {
+    "Armored Lord": "Advanced",
+    "High Lord": "Advanced",
+    "Wyvern Master": "Advanced",
+    "Emperor": "Master",
+    "Great Lord": "Master",
+    "Barbarossa": "Master",
+    "Enlightened One": "Master",
+}
+# Flat bonus added to a spliced-in unique class's fit score (additive, not
+# a multiplier - Armored Lord's stat line, all HP/Def and a NEGATIVE Spd,
+# scores below zero for a Physical Attacker role's weighted dot product,
+# and a multiplier only makes a negative score more negative). +8 clears
+# the largest ordinary winning margins seen in practice (Edelgard's own
+# Physical-Attacker path: Armored Lord/Emperor's negative-Spd, tank-leaning
+# stat lines actually score a couple points worse than Swordmaster/Wyvern
+# Lord on raw stats alone - a big enough real-world gap that a smaller
+# bonus, e.g. +5, still lost to them) while still occasionally losing a
+# dead-even tie to a tier's genuinely best-specialized class (e.g. Byleth's
+# Great Knight for a Tank build over the more general-purpose Enlightened
+# One) rather than mechanically overriding every role, every time,
+# regardless of fit.
+UNIQUE_CLASS_SCORE_BONUS = 8.0
+
+# Small score bonus for a class whose certification weapon overlaps a
+# character's own starting weapon proficiency (character_weapon_talent.csv)
+# - "each class also helps a character grow in a specific weapon rank
+# faster than others." This generalizes what apply_weapon_affinity_fallback
+# already did (matching proficiency) from a Beginner-tier-only tie-break
+# into a real, if modest, factor at every tier: kept deliberately small
+# relative to a class's real stat-boost contribution (which is usually
+# several points) so it refines close calls and rewards leaning into a
+# character's own natural weapon strengths, without overriding a tier
+# where the stat data already has a clear, better-fitting answer.
+WEAPON_PROFICIENCY_BONUS = 0.5
+
 
 def reachable_tiers(target_level: int, tiers: list[str] = TIER_ORDER) -> list[str]:
     """
@@ -243,6 +306,35 @@ def score_class_for_role(boost_row: pd.Series, role_weights: dict) -> float:
     return score
 
 
+def weapon_growth_bonus(
+    class_name: str,
+    weapon_req_lookup: dict | None,
+    character_proficiency: set | None,
+) -> float:
+    """
+    WEAPON_PROFICIENCY_BONUS if class_name's certification weapon(s)
+    overlap character_proficiency (the character's own starting weapon
+    talent - see load_character_proficiency_lookup), else 0.0.
+
+    In the real game, training in a class that uses your character's
+    already-strong weapon type is how that weapon rank actually climbs
+    fastest - practicing Sword in a sword-using class raises Sword rank,
+    practicing Reason in a magic class raises Reason rank, and so on. This
+    doesn't simulate weapon-exp gain (see the module's Known Simplifications
+    in README.md), but it does let "this class plays to a strength this
+    character already has" nudge the recommendation, generalizing what
+    apply_weapon_affinity_fallback already did as a Beginner-only
+    tie-break into a small factor at every tier.
+    """
+    if not weapon_req_lookup or not character_proficiency:
+        return 0.0
+    info = weapon_req_lookup.get(class_name)
+    if info is None:
+        return 0.0
+    required_skills = {skill for skill, _ in info["requirements"]}
+    return WEAPON_PROFICIENCY_BONUS if required_skills & character_proficiency else 0.0
+
+
 def primary_stats_for_role(role_weights: dict) -> list[str]:
     """The stat(s) tied for the highest weight in a role profile - e.g. ["HP", "Def"] for Tank."""
     top_weight = max(role_weights.values())
@@ -316,6 +408,60 @@ def load_character_proficiency_lookup(character_weapon_talent_df: pd.DataFrame |
     return lookup
 
 
+def load_starting_level_lookup(starting_level_df: pd.DataFrame | None) -> dict:
+    """
+    Index data/character_starting_level.csv by character name -> the level
+    they actually join the player's roster at ("join level"), rather than
+    the Level 1 baseline Serenes Forest's own base-stats table normalizes
+    everyone to for easy side-by-side comparison ("these are the
+    characters' stats when they are Level 1 in the Noble/Commoner class" -
+    per that page's own header note). For the Protagonist and the 24 house
+    students, join level is a verified 1 (playable from the Ch1 prologue).
+    For Church/Knights of Seiros staff and DLC characters, who join
+    progressively later, join level is an approximate placeholder derived
+    from their recruitment timing (see the CSV's own notes column for each
+    row's sourcing and confidence) rather than a directly-sourced figure -
+    and for the Ashen Wolves specifically (Yuri/Balthus/Constance/Hapi),
+    who canonically auto-scale to roughly match Byleth's own level when
+    recruited rather than joining at one fixed level, no floor is enforced
+    at all (join_level 1, same "doesn't simulate Byleth's own playthrough"
+    gap already documented for cross-house recruitment in team_builder.py).
+
+    Returns {} if starting_level_df is None (backward compatible - callers
+    that don't pass it get today's behavior: everyone treated as level 1).
+    """
+    if starting_level_df is None:
+        return {}
+    lookup = {}
+    for _, row in starting_level_df.iterrows():
+        level = row.get("join_level")
+        lookup[row["name"]] = int(level) if pd.notna(level) else 1
+    return lookup
+
+
+def base_stats_at_join_level(
+    base_row: pd.Series,
+    growth_row: pd.Series,
+    join_level: int,
+) -> dict:
+    """
+    A character's expected stats at their own join level, starting from
+    Serenes Forest's Level-1-baseline base stats (see
+    load_starting_level_lookup) and adding expected growth for the levels
+    between 1 and join_level - the same expected-value approach
+    expected_stats_at_level uses for level-ups in general (growth_rate% per
+    level, no class boost - Noble/Commoner, the starting classes, both have
+    an all-zero boost row, so there's nothing to add there). join_level=1
+    (the default for most of the roster) returns the raw base stats
+    unchanged, since there are no levels to bridge.
+    """
+    levels_gained = max(join_level - 1, 0)
+    return {
+        stat: round(base_row[stat] + (growth_row[stat] / 100) * levels_gained, 1)
+        for stat in STAT_COLS
+    }
+
+
 def apply_weapon_affinity_fallback(
     tier_classes: pd.DataFrame,
     role_name: str,
@@ -379,6 +525,47 @@ def apply_weapon_affinity_fallback(
     return affinity_matches
 
 
+def restrict_support_to_magic_classes(
+    tier_classes: pd.DataFrame,
+    role_name: str,
+    weapon_req_lookup: dict,
+) -> pd.DataFrame:
+    """
+    For the Support role specifically, drop candidate classes that have no
+    magic (Reason/Faith) access at all, per each class's real certification
+    weapon_category (data/class_weapon_requirements.csv - "magic" or
+    "hybrid" pass, "physical" is dropped).
+
+    Why this exists: Support's fit score is driven by Resistance (see
+    ROLE_PROFILES), which several purely physical/flying classes also boost
+    generously - Falcon Knight boosts Res +4 with no Reason/Faith access at
+    all, which could out-score every real healer class at Master tier on
+    Res alone, landing a healer-archetype character (e.g. Mercedes) in a
+    class that literally can't cast the healing magic that made her a
+    Support pick in the first place. A class with no certification data
+    (Unique-tier classes, whose requirements aren't in the CSV - see
+    load_weapon_requirements_lookup) is left in rather than dropped, since
+    "unknown" shouldn't be treated as "definitely non-magic"; if this hard
+    filter would eliminate every candidate at a tier (an honest gap in the
+    data, not a real one for this game - every tier has at least one magic
+    or hybrid option), the unfiltered tier is returned instead of an empty
+    one.
+    """
+    if role_name != "Support" or not weapon_req_lookup:
+        return tier_classes
+
+    def has_magic_access(name: str) -> bool:
+        info = weapon_req_lookup.get(name)
+        if info is None:
+            return True  # no requirement data on file - don't block on an unknown
+        return info["weapon_category"] in ("magic", "hybrid")
+
+    magic_capable = tier_classes[tier_classes["name"].map(has_magic_access)]
+    if magic_capable.empty:
+        return tier_classes
+    return magic_capable
+
+
 def restrict_to_primary_relevant(tier_classes: pd.DataFrame, role_weights: dict) -> pd.DataFrame:
     """
     Narrow a tier's candidate classes to those that contribute at least
@@ -415,6 +602,28 @@ def restrict_to_primary_relevant(tier_classes: pd.DataFrame, role_weights: dict)
     if has_primary_relevance.any():
         return tier_classes[has_primary_relevance]
     return tier_classes
+
+
+def eligible_unique_story_class_by_tier(
+    character_name: str,
+    eligibility_lookup: dict,
+    character_gender: str | None = None,
+) -> dict:
+    """
+    tier -> class_name for each UNIQUE_STORY_CLASS_TIER entry character_name
+    is eligible for (see is_class_eligible) - in practice non-empty only
+    for the Protagonist and the three house leaders, since every entry in
+    UNIQUE_STORY_CLASS_TIER is locked to exactly one character. Used by
+    recommend_path and list_eligible_classes_at_tier to splice a
+    character's own personal story class into their path at its documented
+    tier, rather than only surfacing it via the separate
+    eligible_unique_classes callout.
+    """
+    result = {}
+    for class_name, tier in UNIQUE_STORY_CLASS_TIER.items():
+        if is_class_eligible(character_name, class_name, eligibility_lookup, character_gender):
+            result[tier] = class_name
+    return result
 
 
 def explain_pick(
@@ -478,10 +687,12 @@ def recommend_path(
     character_gender: str | None = None,
     weapon_req_lookup: dict | None = None,
     character_proficiency: set | None = None,
+    include_dlc_classes: bool = False,
 ) -> list[dict]:
     """
     For a target role, pick the best-fitting class at each tier in order.
-    Returns a list of {"tier": ..., "class": ..., "score": ...} dicts.
+    Returns a list of {"tier": ..., "class": ..., "score": ..., "why": ...,
+    "requirement": ..., "is_unique_class": ...} dicts.
 
     If target_level is given, the path is truncated to only tiers reachable
     at that level (see TIER_LEVEL_REQUIREMENTS / reachable_tiers) - e.g. a
@@ -497,7 +708,22 @@ def recommend_path(
     "Pegasus Knight" considered even if it would otherwise score best, and
     "Lord" is only considered for the three house leaders. If either is
     omitted, no eligibility filtering happens (backward compatible with
-    callers that don't have this data on hand).
+    callers that don't have this data on hand). The same two arguments also
+    control unique-class splicing: if character_name has a personal Unique-
+    tier story class mapped to a reachable tier (Emperor, Great Lord,
+    Barbarossa, Enlightened One, and their Advanced-tier predecessors - see
+    UNIQUE_STORY_CLASS_TIER), it's added to that tier's candidate pool and
+    weighted to win it (UNIQUE_CLASS_SCORE_WEIGHT) whenever it's reasonably
+    competitive for role_name, not only when it already tops the raw stat
+    score - it's the character's own canonical class in the story.
+
+    include_dlc_classes: when True, merges the four Cindered Shadows
+    certification classes (Trickster, War Monk/Cleric, Dark Flier, Valkyrie
+    - see DLC_CLASS_TIER/DLC_CLASS_MERGE_TIER) into the Advanced tier's
+    candidate pool, same eligibility rules as everything else. Off by
+    default - same "opt-in and separate from the base roster" precedent as
+    team_builder's include_dlc for DLC characters, since these also require
+    owning the Cindered Shadows DLC.
     """
     role_weights = ROLE_PROFILES[role_name]
     path = []
@@ -505,8 +731,15 @@ def recommend_path(
     reachable = reachable_tiers(target_level, tiers) if target_level is not None else tiers
     check_eligibility = character_name is not None and eligibility_lookup is not None
 
+    unique_by_tier = (
+        eligible_unique_story_class_by_tier(character_name, eligibility_lookup, character_gender)
+        if check_eligibility else {}
+    )
+
     for tier in reachable:
         tier_classes = stat_boosts_df[stat_boosts_df["tier"] == tier]
+        if include_dlc_classes and tier == DLC_CLASS_MERGE_TIER:
+            tier_classes = pd.concat([tier_classes, stat_boosts_df[stat_boosts_df["tier"] == DLC_CLASS_TIER]])
 
         # Exclude story/enemy-specific variant rows (e.g. "Lord (Judith)",
         # "Fortress Knight (Chapter 5 Gilbert)") - these are one-off NPC/boss
@@ -523,25 +756,58 @@ def recommend_path(
                 lambda name: is_class_eligible(character_name, name, eligibility_lookup, character_gender)
             )]
 
+        unique_class_name = unique_by_tier.get(tier)
+        if unique_class_name and unique_class_name not in tier_classes["name"].values:
+            tier_classes = pd.concat([tier_classes, stat_boosts_df[stat_boosts_df["name"] == unique_class_name]])
+
         if tier_classes.empty:
             continue
 
-        tier_classes = apply_weapon_affinity_fallback(
-            tier_classes, role_name, role_weights, weapon_req_lookup or {}, character_proficiency
-        )
-        tier_classes = restrict_to_primary_relevant(tier_classes, role_weights)
+        # The spliced-in unique class (if any) is exempted from the two
+        # narrowing filters below: restrict_to_primary_relevant would
+        # otherwise drop it outright whenever its stat line doesn't touch
+        # the role's primary stat at all (e.g. Armored Lord's 0 Str would
+        # get it dropped for a Physical Attacker role, before the scoring
+        # bonus even gets a chance to weigh it) - it should always reach
+        # scoring, where UNIQUE_CLASS_SCORE_BONUS decides whether it wins.
+        is_unique_row = tier_classes["name"] == unique_class_name
+        unique_row_df = tier_classes[is_unique_row]
+        rest = tier_classes[~is_unique_row]
 
-        scores = tier_classes.apply(lambda row: score_class_for_role(row, role_weights), axis=1)
+        rest = restrict_support_to_magic_classes(rest, role_name, weapon_req_lookup or {})
+        rest = apply_weapon_affinity_fallback(
+            rest, role_name, role_weights, weapon_req_lookup or {}, character_proficiency
+        )
+        rest = restrict_to_primary_relevant(rest, role_weights)
+        tier_classes = pd.concat([rest, unique_row_df]) if not unique_row_df.empty else rest
+
+        def score_row(row, unique_class_name=unique_class_name):
+            score = score_class_for_role(row, role_weights)
+            score += weapon_growth_bonus(row["name"], weapon_req_lookup, character_proficiency)
+            if row["name"] == unique_class_name:
+                score += UNIQUE_CLASS_SCORE_BONUS
+            return score
+
+        scores = tier_classes.apply(score_row, axis=1)
         best_idx = scores.idxmax()
         best_row = tier_classes.loc[best_idx]
         best_class = best_row["name"]
+        is_unique_pick = unique_class_name is not None and best_class == unique_class_name
+
+        why = (
+            f"{character_name}'s own unique class at this tier - their canonical path in the story, "
+            f"weighted above the generic options here."
+            if is_unique_pick else
+            explain_pick(best_row, role_weights, role_name, weapon_req_lookup, character_proficiency)
+        )
 
         path.append({
             "tier": tier,
             "class": best_class,
             "score": round(float(scores.loc[best_idx]), 2),
-            "why": explain_pick(best_row, role_weights, role_name, weapon_req_lookup, character_proficiency),
+            "why": why,
             "requirement": format_requirement(best_class, weapon_req_lookup) if weapon_req_lookup else None,
+            "is_unique_class": is_unique_pick,
         })
 
     return path
@@ -553,6 +819,7 @@ def list_eligible_classes_at_tier(
     character_name: str | None = None,
     eligibility_lookup: dict | None = None,
     character_gender: str | None = None,
+    include_dlc_classes: bool = False,
 ) -> list[str]:
     """
     Every player-selectable class name at `tier` that character_name is
@@ -560,21 +827,35 @@ def list_eligible_classes_at_tier(
     is_class_eligible), excluding story/enemy-specific variant rows (e.g.
     "Lord (Judith)"). If character_name/eligibility_lookup are omitted, no
     eligibility filtering happens and every class at that tier is
-    returned.
+    returned. If character_name has a personal Unique-tier story class
+    mapped to `tier` (see UNIQUE_STORY_CLASS_TIER) and eligibility_lookup
+    is given, it's included alongside the tier's regular classes - same
+    "incorporated as an option" treatment recommend_path gives it.
+    include_dlc_classes additionally merges the Cindered Shadows
+    certification classes into the Advanced tier's option list (see
+    DLC_CLASS_TIER/DLC_CLASS_MERGE_TIER).
 
     Used to let a user override the recommended pick at a given tier with
     any other class they were actually eligible for - the "mix and match"
     path - rather than only ever seeing the single top-scoring choice.
     """
     tier_classes = stat_boosts_df[stat_boosts_df["tier"] == tier]
+    if include_dlc_classes and tier == DLC_CLASS_MERGE_TIER:
+        tier_classes = pd.concat([tier_classes, stat_boosts_df[stat_boosts_df["tier"] == DLC_CLASS_TIER]])
     tier_classes = tier_classes[~tier_classes["name"].str.contains(r"\(", regex=True)]
 
-    if character_name is not None and eligibility_lookup is not None:
-        tier_classes = tier_classes[tier_classes["name"].apply(
-            lambda name: is_class_eligible(character_name, name, eligibility_lookup, character_gender)
-        )]
+    names = set(tier_classes["name"].tolist())
 
-    return sorted(tier_classes["name"].tolist())
+    if character_name is not None and eligibility_lookup is not None:
+        names = {
+            name for name in names
+            if is_class_eligible(character_name, name, eligibility_lookup, character_gender)
+        }
+        unique_by_tier = eligible_unique_story_class_by_tier(character_name, eligibility_lookup, character_gender)
+        if tier in unique_by_tier:
+            names.add(unique_by_tier[tier])
+
+    return sorted(names)
 
 
 def eligible_unique_classes(
@@ -619,13 +900,27 @@ def expected_stats_at_level(
     growth_row: pd.Series,
     final_class_boost_row: pd.Series,
     target_level: int = 30,
+    start_level: int = 1,
 ) -> dict:
     """
     Estimate a character's expected stats at target_level in a given final
-    class: base stats + expected level-up gains (growth_rate% per level,
-    used as an expected value - e.g. a 45% growth rate contributes 0.45
-    expected stat points per level, not a simulated coin flip) + the final
-    class's stat boost.
+    class: base stats (still Serenes Forest's Level-1 baseline - see
+    load_starting_level_lookup) + expected level-up gains from start_level
+    up to target_level (growth_rate% per level, used as an expected value -
+    e.g. a 45% growth rate contributes 0.45 expected stat points per level,
+    not a simulated coin flip) + the final class's stat boost.
+
+    start_level defaults to 1 (today's behavior - every level from 1 to
+    target_level counts) but should be a character's own join level when
+    known (see load_starting_level_lookup / base_stats_at_join_level) - a
+    character who doesn't actually join the roster until level 15 has
+    already banked those 14 levels' worth of growth by the time you can
+    recruit them, so target_level should never be projected as if they
+    started from level 1 the way a Ch1 house student did. target_level
+    below start_level is treated as target_level == start_level (0 levels
+    gained) rather than producing a negative gain - callers should clamp
+    the target-level input itself (see recommend_for_character) so this is
+    just a safety floor, not the primary enforcement point.
 
     This is an expected-value calculation, not a single simulated
     playthrough - it answers "on average, how strong would this character
@@ -634,7 +929,7 @@ def expected_stats_at_level(
     to show the range of outcomes, not just the average) is a natural
     upgrade for a later stage.
     """
-    levels_gained = target_level - 1
+    levels_gained = max(target_level - start_level, 0)
     result = {}
     for stat in STAT_COLS:
         base = base_row[stat]
@@ -651,6 +946,7 @@ def stats_for_class_at_level(
     growth_rates_df: pd.DataFrame,
     stat_boosts_df: pd.DataFrame,
     target_level: int = 30,
+    start_level: int = 1,
 ) -> dict | None:
     """
     Expected stats for character_name at target_level, if their current
@@ -660,6 +956,8 @@ def stats_for_class_at_level(
     user picks by hand. Powers the "mix and match" path override in the
     UI: swap in a different class at whichever tier you'd actually end on,
     and see the resulting projection, not just the tool's own top pick.
+    start_level should be the character's own join level when known (see
+    load_starting_level_lookup) - passed through to expected_stats_at_level.
     Returns None if class_name isn't in stat_boosts_df at all.
     """
     boost_rows = stat_boosts_df[stat_boosts_df["name"] == class_name]
@@ -667,7 +965,7 @@ def stats_for_class_at_level(
         return None
     base_row = base_stats_df[base_stats_df["name"] == character_name].iloc[0]
     growth_row = growth_rates_df[growth_rates_df["name"] == character_name].iloc[0]
-    return expected_stats_at_level(base_row, growth_row, boost_rows.iloc[0], target_level)
+    return expected_stats_at_level(base_row, growth_row, boost_rows.iloc[0], target_level, start_level)
 
 
 def recommend_for_character(
@@ -681,6 +979,8 @@ def recommend_for_character(
     character_gender_df: pd.DataFrame | None = None,
     weapon_req_df: pd.DataFrame | None = None,
     character_weapon_talent_df: pd.DataFrame | None = None,
+    starting_level_df: pd.DataFrame | None = None,
+    include_dlc_classes: bool = False,
 ) -> dict:
     """
     Full recommendation for one character: auto-detects a role if none is
@@ -697,10 +997,17 @@ def recommend_for_character(
     and character_weapon_talent_df (data/character_weapon_talent.csv), if
     given, attach a certification-requirement string to each path step and
     feed the character's own starting weapon proficiency into the
-    weapon-affinity fallback (see apply_weapon_affinity_fallback). All four
-    are optional and default to None, which disables the corresponding
-    feature entirely - existing callers that don't pass them keep getting
-    today's behavior.
+    weapon-affinity fallback and the weapon-growth scoring bonus (see
+    apply_weapon_affinity_fallback / weapon_growth_bonus). starting_level_df
+    (data/character_starting_level.csv), if given, supplies the character's
+    join level (see load_starting_level_lookup): target_level is floored to
+    that join level (a character can never be projected below the level
+    they actually join the roster at - see the "join_level" return value),
+    and both "base_stats" and "expected_final_stats" are computed from that
+    join level rather than assuming everyone starts from level 1. All these
+    are optional and default to None/False, which disables the
+    corresponding feature entirely - existing callers that don't pass them
+    keep getting today's behavior (join_level 1, no DLC classes).
     """
     base_row = base_stats_df[base_stats_df["name"] == character_name].iloc[0]
     growth_row = growth_rates_df[growth_rates_df["name"] == character_name].iloc[0]
@@ -721,20 +1028,28 @@ def recommend_for_character(
         if character_weapon_talent_df is not None else {}
     character_proficiency = character_proficiency_lookup.get(character_name)
 
+    starting_level_lookup = load_starting_level_lookup(starting_level_df)
+    join_level = starting_level_lookup.get(character_name, 1)
+    effective_target_level = max(target_level, join_level)
+    base_stats_at_join = base_stats_at_join_level(base_row, growth_row, join_level)
+
     path = recommend_path(
-        stat_boosts_df, used_role, target_level=target_level,
+        stat_boosts_df, used_role, target_level=effective_target_level,
         character_name=character_name,
         eligibility_lookup=eligibility_lookup,
         character_gender=character_gender,
         weapon_req_lookup=weapon_req_lookup,
         character_proficiency=character_proficiency,
+        include_dlc_classes=include_dlc_classes,
     )
     final_class_name = path[-1]["class"] if path else None
 
     final_stats = None
     if final_class_name:
         final_boost_row = stat_boosts_df[stat_boosts_df["name"] == final_class_name].iloc[0]
-        final_stats = expected_stats_at_level(base_row, growth_row, final_boost_row, target_level)
+        final_stats = expected_stats_at_level(
+            base_row, growth_row, final_boost_row, effective_target_level, start_level=join_level,
+        )
 
     unique_options = None
     if eligibility_lookup is not None:
@@ -749,7 +1064,10 @@ def recommend_for_character(
         "auto_detected_role": detected_role,
         "auto_detection_score": round(detection_score, 3),
         "path": path,
-        "expected_stats_at_level": target_level,
+        "expected_stats_at_level": effective_target_level,
+        "requested_target_level": target_level,
+        "join_level": join_level,
+        "base_stats_at_join_level": base_stats_at_join,
         "expected_final_stats": final_stats,
         "eligible_unique_classes": unique_options,
     }
@@ -763,6 +1081,7 @@ def main():
     character_gender_df = pd.read_csv(DATA_DIR / "character_gender.csv")
     weapon_req_df = pd.read_csv(DATA_DIR / "class_weapon_requirements.csv")
     character_weapon_talent_df = pd.read_csv(DATA_DIR / "character_weapon_talent.csv")
+    starting_level_df = pd.read_csv(DATA_DIR / "character_starting_level.csv")
 
     import argparse
     parser = argparse.ArgumentParser(description="Recommend a Three Houses class path for a character.")
@@ -771,6 +1090,9 @@ def main():
                          choices=list(ROLE_PROFILES.keys()),
                          help="Target role (omit to auto-detect from growth rates)")
     parser.add_argument("--level", type=int, default=30, help="Target level for stat projection")
+    parser.add_argument("--include-dlc-classes", action="store_true",
+                         help="Also consider the Cindered Shadows certification classes (Trickster, "
+                              "War Monk/Cleric, Dark Flier, Valkyrie) as Advanced-tier options.")
     args = parser.parse_args()
 
     result = recommend_for_character(
@@ -778,17 +1100,25 @@ def main():
         role_name=args.role, target_level=args.level,
         eligibility_df=eligibility_df, character_gender_df=character_gender_df,
         weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
+        starting_level_df=starting_level_df, include_dlc_classes=args.include_dlc_classes,
     )
 
     print(f"\n{result['character']}")
+    if result["join_level"] > 1:
+        print(f"Joins the roster at level {result['join_level']} - base stats and stat projection "
+              f"start from there, not level 1.")
+    if result["expected_stats_at_level"] != args.level:
+        print(f"Target level {args.level} is below join level {result['join_level']} - "
+              f"using {result['expected_stats_at_level']} instead.")
     print(f"Auto-detected natural role: {result['auto_detected_role']} (similarity {result['auto_detection_score']})")
     print(f"Recommended path toward: {result['role_used']}")
     if not result["path"]:
-        print(f"  (no tier reachable at level {args.level} - Beginner requires level "
+        print(f"  (no tier reachable at level {result['expected_stats_at_level']} - Beginner requires level "
               f"{TIER_LEVEL_REQUIREMENTS['Beginner']})")
     else:
         for step in result["path"]:
-            print(f"  {step['tier']:>13}: {step['class']} (fit score {step['score']})")
+            tag = " [unique class]" if step.get("is_unique_class") else ""
+            print(f"  {step['tier']:>13}: {step['class']}{tag} (fit score {step['score']})")
             if step.get("requirement"):
                 print(f"  {'':>13}     requires {step['requirement']}")
             print(f"  {'':>13}  -> {step['why']}")

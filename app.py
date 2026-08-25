@@ -18,11 +18,16 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from src.optimizer import (
+    DLC_CLASS_TIER,
     ROLE_PROFILES,
     STAT_COLS,
+    TIER_ORDER,
+    format_requirement,
     list_eligible_classes_at_tier,
     load_eligibility_lookup,
+    load_weapon_requirements_lookup,
     recommend_for_character,
+    score_class_for_role,
     stats_for_class_at_level,
 )
 from src.team_builder import (
@@ -32,6 +37,7 @@ from src.team_builder import (
     cross_house_names_in_pool,
     get_candidate_pool,
     load_recruitment_lookup,
+    mandatory_names_for_route,
 )
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
@@ -46,7 +52,7 @@ def load_data() -> tuple[pd.DataFrame, ...]:
     required = [
         "character_base_stats.csv", "character_growth_rates.csv", "class_stat_boosts.csv",
         "class_eligibility.csv", "character_gender.csv", "class_weapon_requirements.csv",
-        "character_weapon_talent.csv", "recruitment_requirements.csv",
+        "character_weapon_talent.csv", "recruitment_requirements.csv", "character_starting_level.csv",
     ]
     missing = [f for f in required if not (DATA_DIR / f).exists()]
     if missing:
@@ -67,6 +73,7 @@ def load_data() -> tuple[pd.DataFrame, ...]:
         pd.read_csv(DATA_DIR / "class_weapon_requirements.csv"),
         pd.read_csv(DATA_DIR / "character_weapon_talent.csv"),
         pd.read_csv(DATA_DIR / "recruitment_requirements.csv"),
+        pd.read_csv(DATA_DIR / "character_starting_level.csv"),
     )
 
 
@@ -122,6 +129,9 @@ def render_path_with_mixmatch(
     stat_boosts_df: pd.DataFrame,
     eligibility_lookup: dict | None,
     character_gender: str | None,
+    role_weights: dict,
+    weapon_req_lookup: dict,
+    include_dlc_classes: bool = False,
 ) -> list[str]:
     """
     Render the recommended class path, letting the user swap in a
@@ -132,6 +142,12 @@ def render_path_with_mixmatch(
     matters for that, since only the current/final class's boost applies
     in-game, but every tier is independently overridable so the full path
     can be browsed hypothetically.
+
+    A user's own pick (not the recommended class) still shows its fit
+    score against role_weights and its certification weapon-rank
+    requirement (weapon_req_lookup - see load_weapon_requirements_lookup),
+    the same information the recommended pick gets, rather than just "your
+    pick, overrides the recommendation" with no numbers to compare against.
     """
     st.subheader("Recommended Class Path")
     st.caption(
@@ -146,6 +162,7 @@ def render_path_with_mixmatch(
             options = list_eligible_classes_at_tier(
                 step["tier"], stat_boosts_df, character_name=character,
                 eligibility_lookup=eligibility_lookup, character_gender=character_gender,
+                include_dlc_classes=include_dlc_classes,
             )
             if step["class"] not in options:
                 options = sorted(set(options) | {step["class"]})
@@ -155,48 +172,56 @@ def render_path_with_mixmatch(
             )
             selected.append(choice)
             if choice == step["class"]:
+                if step.get("is_unique_class"):
+                    st.caption("⭐ Their own unique class")
                 st.caption(f"fit score {step['score']}")
                 if step.get("requirement"):
                     st.caption(f"Requires: {step['requirement']}")
                 st.caption(step["why"])
             else:
+                choice_row = stat_boosts_df[stat_boosts_df["name"] == choice]
+                choice_score = (
+                    round(float(score_class_for_role(choice_row.iloc[0], role_weights)), 2)
+                    if not choice_row.empty else None
+                )
                 st.caption("Your pick - overrides the recommendation.")
+                if choice_score is not None:
+                    st.caption(f"fit score {choice_score}")
+                requirement = format_requirement(choice, weapon_req_lookup)
+                if requirement:
+                    st.caption(f"Requires: {requirement}")
     return selected
 
 
-def render_stat_charts(base_row: pd.Series, final_stats: dict, character: str, final_class: str):
+def render_stat_charts(
+    base_row: dict, final_stats: dict, character: str, final_class: str, base_level_label: str = "Level 1",
+):
     st.subheader("Projected Stats")
 
-    tab_radar, tab_bar = st.tabs(["Radar", "Bar"])
+    # Bar first: it's the more-used view (exact per-stat deltas are easier to
+    # read off bars than a radar's overlapping fill shapes), so it's the tab
+    # that's already active on load - st.tabs() activates whichever is
+    # listed first, so the order below IS the default.
+    tab_bar, tab_radar = st.tabs(["Bar", "Radar"])
 
-    with tab_radar:
-        fig = go.Figure()
-        fig.add_trace(go.Scatterpolar(
-            r=[base_row[s] for s in STAT_COLS],
-            theta=STAT_COLS,
-            fill="toself",
-            name=f"{character} (Level 1)",
-            opacity=0.6,
-        ))
-        fig.add_trace(go.Scatterpolar(
-            r=[final_stats[s] for s in STAT_COLS],
-            theta=STAT_COLS,
-            fill="toself",
-            name=f"Projected as {final_class}",
-        ))
-        fig.update_layout(
-            polar=dict(radialaxis=dict(visible=True)),
-            height=450,
-            margin=dict(l=0, r=0, t=10, b=0),
-        )
-        st.plotly_chart(fig, use_container_width=True, key=f"radar_{character}_{final_class}")
+    # Padding added above the tallest bar, and extra top margin, so a
+    # hover label over one of the tallest bars has somewhere to draw
+    # itself - Plotly clips a hover label at the plot's own boundary
+    # rather than letting it overflow outside the chart area, which was
+    # cutting off the top of the tooltip for exactly the stats worth
+    # hovering over (the highest ones). A legend placed above the plot
+    # (rather than Plotly's default top-right-inside-the-plot corner)
+    # keeps it from sitting on top of the tallest bars and their tooltips
+    # in the first place.
+    max_value = max(list(base_row.values()) + list(final_stats.values()) + [1])
+    y_range = [0, max_value * 1.25]
 
     with tab_bar:
         fig = go.Figure()
         fig.add_trace(go.Bar(
             x=STAT_COLS,
             y=[base_row[s] for s in STAT_COLS],
-            name=f"{character} (Level 1)",
+            name=f"{character} ({base_level_label})",
             opacity=0.6,
         ))
         fig.add_trace(go.Bar(
@@ -206,11 +231,37 @@ def render_stat_charts(base_row: pd.Series, final_stats: dict, character: str, f
         ))
         fig.update_layout(
             barmode="group",
-            height=450,
-            margin=dict(l=0, r=0, t=10, b=0),
+            height=480,
+            margin=dict(l=0, r=0, t=60, b=0),
             yaxis_title="Stat value",
+            yaxis=dict(range=y_range),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            hoverlabel=dict(namelength=-1),
         )
         st.plotly_chart(fig, use_container_width=True, key=f"bar_{character}_{final_class}")
+
+    with tab_radar:
+        fig = go.Figure()
+        fig.add_trace(go.Scatterpolar(
+            r=[base_row[s] for s in STAT_COLS],
+            theta=STAT_COLS,
+            fill="toself",
+            name=f"{character} ({base_level_label})",
+            opacity=0.6,
+        ))
+        fig.add_trace(go.Scatterpolar(
+            r=[final_stats[s] for s in STAT_COLS],
+            theta=STAT_COLS,
+            fill="toself",
+            name=f"Projected as {final_class}",
+        ))
+        fig.update_layout(
+            polar=dict(radialaxis=dict(visible=True, range=y_range)),
+            height=480,
+            margin=dict(l=0, r=0, t=60, b=0),
+            legend=dict(orientation="h", yanchor="bottom", y=1.1, xanchor="left", x=0),
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f"radar_{character}_{final_class}")
 
     st.caption(
         "Projection = base stats + expected level-up gains (growth rate used as an "
@@ -226,7 +277,10 @@ def render_team(team: list[dict], dlc_names: set[str]):
     st.caption("Role coverage: " + ", ".join(f"{role} x{count}" for role, count in role_counts.items()))
 
     for member in team:
-        path_str = " → ".join(step["class"] for step in member["path"])
+        path_str = " → ".join(
+            f"{step['class']}⭐" if step.get("is_unique_class") else step["class"]
+            for step in member["path"]
+        )
         with st.container(border=True):
             col1, col2, col3 = st.columns([1, 1, 3])
             with col1:
@@ -242,8 +296,75 @@ def render_team(team: list[dict], dlc_names: set[str]):
                 st.caption(f"Why on the team: {member['why']}")
 
 
+CLASS_CHART_STATS = STAT_COLS + ["Mov"]
+
+
+def render_class_explorer_tab(stat_boosts_df: pd.DataFrame, weapon_req_df: pd.DataFrame):
+    st.caption(
+        "Browse a class's own stat boosts - the flat bonus it adds on top of whatever character "
+        "wears it. Unlike most Fire Emblem games, Three Houses growth rates belong to the "
+        "*character*, not the class, and don't change based on what you're wearing - a class only "
+        "contributes its fixed boost (shown here) plus, at Master tier and above, a faster-climbing "
+        "stat cap. \"Class growth rates\" isn't really a thing in this game; this is the number that "
+        "actually plays that role."
+    )
+
+    selectable = stat_boosts_df[~stat_boosts_df["name"].str.contains(r"\(", regex=True)]
+    selectable = selectable[~selectable["tier"].isin(["NPC/Enemy"])]
+    include_dlc_classes = st.checkbox(
+        "Include DLC classes (Cindered Shadows)", value=False, key="explorer_include_dlc",
+    )
+    if not include_dlc_classes:
+        selectable = selectable[selectable["tier"] != DLC_CLASS_TIER]
+
+    tier_order_lookup = {tier: i for i, tier in enumerate(TIER_ORDER + ["Unique", DLC_CLASS_TIER])}
+    tier_by_name = dict(zip(selectable["name"], selectable["tier"]))
+    names = sorted(
+        selectable["name"].tolist(),
+        key=lambda n: (tier_order_lookup.get(tier_by_name.get(n), 99), n),
+    )
+
+    weapon_req_lookup = load_weapon_requirements_lookup(weapon_req_df)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        class_a = st.selectbox("Class", options=names, key="explorer_class_a")
+    with col2:
+        class_b = st.selectbox("Compare with (optional)", options=["(none)"] + names, key="explorer_class_b")
+
+    row_a = stat_boosts_df[stat_boosts_df["name"] == class_a].iloc[0]
+    st.caption(
+        f"**{class_a}** - {row_a['tier']} tier"
+        + (f" - requires {format_requirement(class_a, weapon_req_lookup)}"
+           if format_requirement(class_a, weapon_req_lookup) else "")
+    )
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=CLASS_CHART_STATS, y=[row_a[s] for s in CLASS_CHART_STATS], name=class_a))
+    if class_b != "(none)":
+        row_b = stat_boosts_df[stat_boosts_df["name"] == class_b].iloc[0]
+        fig.add_trace(go.Bar(x=CLASS_CHART_STATS, y=[row_b[s] for s in CLASS_CHART_STATS], name=class_b))
+        req_b = format_requirement(class_b, weapon_req_lookup)
+        st.caption(f"**{class_b}** - {row_b['tier']} tier" + (f" - requires {req_b}" if req_b else ""))
+
+    all_values = [row_a[s] for s in CLASS_CHART_STATS]
+    if class_b != "(none)":
+        all_values += [row_b[s] for s in CLASS_CHART_STATS]
+    y_min = min(min(all_values), 0) * 1.2 if min(all_values) < 0 else 0
+    y_max = max(max(all_values), 1) * 1.25
+    fig.update_layout(
+        barmode="group",
+        height=420,
+        margin=dict(l=0, r=0, t=60, b=0),
+        yaxis_title="Stat boost",
+        yaxis=dict(range=[y_min, y_max]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    st.plotly_chart(fig, use_container_width=True, key=f"class_explorer_{class_a}_{class_b}")
+
+
 def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
-                          weapon_req_df, character_weapon_talent_df, playable_names, dlc_names):
+                          weapon_req_df, character_weapon_talent_df, starting_level_df, playable_names, dlc_names):
     st.caption(
         "Pick a character and see a recommended class path - either toward their "
         "natural strengths, or a role you choose. Only classes that character can "
@@ -265,6 +386,13 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
     with col3:
         target_level = st.slider("Target level", min_value=5, max_value=40, value=DEFAULT_TARGET_LEVEL, key="char_level")
 
+    include_dlc_classes = st.checkbox(
+        "Include DLC classes (Cindered Shadows certification classes)", value=False,
+        key="char_include_dlc_classes",
+        help="Also considers Trickster, War Monk/Cleric, Dark Flier and Valkyrie as Advanced-tier options - "
+             "these need the Cindered Shadows DLC, same as the DLC-exclusive characters do.",
+    )
+
     role_name = None if role_choice == "Auto-detect from growth rates" else role_choice
 
     result = recommend_for_character(
@@ -272,6 +400,7 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
         role_name=role_name, target_level=target_level,
         eligibility_df=eligibility_df, character_gender_df=character_gender_df,
         weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
+        starting_level_df=starting_level_df, include_dlc_classes=include_dlc_classes,
     )
 
     col_portrait, col_info = st.columns([1, 5])
@@ -288,6 +417,16 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
                 f"Their own natural role auto-detects as **{result['auto_detected_role']}** "
                 f"(similarity {result['auto_detection_score']}) - you're targeting **{role_name}** instead."
             )
+        if result["join_level"] > 1:
+            st.caption(
+                f"🕐 Joins the roster at level {result['join_level']} - base stats and the "
+                f"projection below start from there, not level 1."
+            )
+        if result["expected_stats_at_level"] != result["requested_target_level"]:
+            st.caption(
+                f"Target level {result['requested_target_level']} is below their join level - "
+                f"projecting to level {result['expected_stats_at_level']} instead."
+            )
 
     if not result["path"]:
         st.warning("No class path could be built - check that class_stat_boosts.csv has data for all tiers.")
@@ -299,24 +438,72 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
     if not gender_row.empty:
         character_gender = gender_row.iloc[0]["gender"]
 
+    weapon_req_lookup = load_weapon_requirements_lookup(weapon_req_df)
+    role_weights = ROLE_PROFILES[result["role_used"]]
+
     selected_path = render_path_with_mixmatch(
         result["path"], character, stat_boosts_df, eligibility_lookup, character_gender,
+        role_weights, weapon_req_lookup, include_dlc_classes=include_dlc_classes,
     )
     final_class = selected_path[-1]
 
     st.divider()
-    base_row = base_stats_df[base_stats_df["name"] == character].iloc[0]
+    effective_level = result["expected_stats_at_level"]
     if final_class == result["path"][-1]["class"]:
         final_stats = result["expected_final_stats"]
     else:
         final_stats = stats_for_class_at_level(
-            character, final_class, base_stats_df, growth_rates_df, stat_boosts_df, target_level,
+            character, final_class, base_stats_df, growth_rates_df, stat_boosts_df,
+            effective_level, start_level=result["join_level"],
         )
-    render_stat_charts(base_row, final_stats, character, final_class)
+    base_level_label = f"Join Level {result['join_level']}" if result["join_level"] > 1 else "Level 1"
+    render_stat_charts(
+        result["base_stats_at_join_level"], final_stats, character, final_class,
+        base_level_label=base_level_label,
+    )
+
+    st.button(
+        "📥 Import this build into Team Builder", key=f"import_{character}",
+        help="Locks in this exact class path/stats for the Team Builder tab, instead of it "
+             "recomputing a recommendation for this character from scratch.",
+        on_click=_import_build,
+        args=(character, result, selected_path, final_class, final_stats),
+    )
+    if character in st.session_state.get("imported_builds", {}):
+        st.caption(f"✅ Imported - {character} will use this exact build in the Team Builder tab.")
+
+
+def _import_build(character, result, selected_path, final_class, final_stats):
+    """
+    Callback for the "Import this build into Team Builder" button - stashes
+    this character's currently-selected path/stats (including any mix-and-
+    match overrides) into st.session_state so the Team Builder tab can pick
+    it up as a locked_builds entry (see team_builder.build_team_with_paths)
+    instead of recomputing its own recommendation for this character. Runs
+    as an on_click callback (not inline in the render function) so the
+    import happens before the rerun that follows the click, the standard
+    Streamlit pattern for "this button press should affect what the rest of
+    the app renders on the very next run."
+    """
+    path = result["path"]
+    if selected_path != [step["class"] for step in path]:
+        # A mix-and-match override was in play - only the final/deepest tier
+        # actually feeds stats in-game (see render_path_with_mixmatch), so
+        # rewrite just that last step to reflect the user's actual choice
+        # rather than importing the tool's original recommendation instead
+        # of what's on screen.
+        path = path[:-1] + [{**path[-1], "class": final_class, "is_unique_class": False}]
+    imported = st.session_state.setdefault("imported_builds", {})
+    imported[character] = {
+        "path": path,
+        "final_class": final_class,
+        "expected_final_stats": final_stats,
+        "eligible_unique_classes": result["eligible_unique_classes"],
+    }
 
 
 def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
-                     weapon_req_df, character_weapon_talent_df, recruitment_requirements_df,
+                     weapon_req_df, character_weapon_talent_df, recruitment_requirements_df, starting_level_df,
                      playable_names, dlc_names):
     st.caption(
         "Builds a balanced team from a candidate pool by covering complementary "
@@ -337,10 +524,17 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
     with col3:
         target_level = st.slider("Target level", min_value=5, max_value=40, value=DEFAULT_TARGET_LEVEL, key="team_level")
 
-    col_dlc, col_cross = st.columns(2)
+    col_dlc, col_dlc_classes, col_cross = st.columns(3)
     with col_dlc:
         include_dlc = st.checkbox(
             "Include DLC characters (Cindered Shadows)", value=False, key="team_include_dlc",
+        )
+    with col_dlc_classes:
+        include_dlc_classes = st.checkbox(
+            "Include DLC classes", value=False, key="team_include_dlc_classes",
+            help="Trickster, War Monk/Cleric, Dark Flier and Valkyrie as Advanced-tier options for every "
+                 "team member - a separate thing from DLC *characters* above, since any character can use "
+                 "these classes if you own the Cindered Shadows DLC.",
         )
     with col_cross:
         include_cross_house = st.checkbox(
@@ -363,20 +557,50 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
         base_stats_df, candidates, None if route_choice == "Full roster" else route_choice,
     )
 
+    # Byleth and this route's own lord are force-deployed story units on
+    # their route - the game doesn't let you leave them off the team, so
+    # they're always included and can't be excluded (see
+    # mandatory_names_for_route). No effect on "Full roster", which has no
+    # single lord.
+    mandatory = [n for n in mandatory_names_for_route(route_choice) if n in candidates]
+    if mandatory:
+        st.caption(
+            "🔒 Force-deployed on this route, always included: "
+            + ", ".join(display_name(n, dlc_names) for n in mandatory)
+        )
+
+    imported_builds = st.session_state.get("imported_builds", {})
+    imported_in_pool = [n for n in imported_builds if n in candidates]
+    if imported_builds:
+        with st.container(border=True):
+            st.caption("📥 Imported builds from the Character Optimizer tab (always included):")
+            for name in list(imported_builds.keys()):
+                col_name, col_remove = st.columns([5, 1])
+                in_pool_note = "" if name in candidates else " (not in this pool - won't be added)"
+                col_name.write(f"**{display_name(name, dlc_names)}**: {imported_builds[name]['final_class']}{in_pool_note}")
+                if col_remove.button("Remove", key=f"remove_import_{name}"):
+                    del st.session_state["imported_builds"][name]
+                    st.rerun()
+
     with st.expander("Looking for something specific? (optional)"):
         col_a, col_b = st.columns(2)
+        excludable_options = sorted(set(candidates) - set(mandatory) - set(imported_in_pool), key=str.lower)
         with col_a:
             must_include = st.multiselect(
-                "Must include", options=sorted(candidates, key=str.lower),
+                "Must include", options=excludable_options,
                 format_func=lambda n: display_name(n, dlc_names), key="team_must_include",
-                help="Build the rest of the team around these characters.",
+                help="Build the rest of the team around these characters, in addition to whoever's "
+                     "force-deployed or imported above.",
             )
         with col_b:
             exclude = st.multiselect(
-                "Exclude", options=sorted(candidates, key=str.lower),
+                "Exclude", options=excludable_options,
                 format_func=lambda n: display_name(n, dlc_names), key="team_exclude",
-                help="Leave these characters out of consideration entirely.",
+                help="Leave these characters out of consideration entirely. Force-deployed and imported "
+                     "characters can't be excluded.",
             )
+
+    effective_must_include = list(dict.fromkeys(mandatory + imported_in_pool + must_include))
 
     col_build, col_shuffle = st.columns([1, 1])
     build_clicked = col_build.button("Build Team", type="primary")
@@ -398,9 +622,11 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
             candidates, base_stats_df, growth_rates_df, stat_boosts_df,
             team_size=team_size, target_level=target_level,
             eligibility_df=eligibility_df, character_gender_df=character_gender_df,
-            must_include=must_include, exclude=exclude, rng=rng,
+            must_include=effective_must_include, exclude=exclude, rng=rng,
             recruitment_lookup=recruitment_lookup, cross_house_names=cross_house_names,
             weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
+            starting_level_df=starting_level_df, include_dlc_classes=include_dlc_classes,
+            locked_builds=imported_builds,
         )
         # Persisted in session_state rather than only a local variable: Streamlit reruns this whole
         # function on ANY widget interaction, not just the two build buttons above (e.g. touching the
@@ -426,25 +652,27 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
 def main():
     (
         base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
-        weapon_req_df, character_weapon_talent_df, recruitment_requirements_df,
+        weapon_req_df, character_weapon_talent_df, recruitment_requirements_df, starting_level_df,
     ) = load_data()
     playable_names = get_playable_names(base_stats_df)
     dlc_names = get_dlc_names(base_stats_df)
 
     st.title("⚔️ Three Houses Class Optimizer")
 
-    tab1, tab2 = st.tabs(["Character Optimizer", "Team Builder"])
+    tab1, tab2, tab3 = st.tabs(["Character Optimizer", "Team Builder", "Class Explorer"])
     with tab1:
         render_character_tab(
             base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
-            weapon_req_df, character_weapon_talent_df, playable_names, dlc_names,
+            weapon_req_df, character_weapon_talent_df, starting_level_df, playable_names, dlc_names,
         )
     with tab2:
         render_team_tab(
             base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
-            weapon_req_df, character_weapon_talent_df, recruitment_requirements_df,
+            weapon_req_df, character_weapon_talent_df, recruitment_requirements_df, starting_level_df,
             playable_names, dlc_names,
         )
+    with tab3:
+        render_class_explorer_tab(stat_boosts_df, weapon_req_df)
 
 
 if __name__ == "__main__":

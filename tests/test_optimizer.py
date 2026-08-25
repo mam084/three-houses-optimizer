@@ -21,23 +21,32 @@ from pathlib import Path
 import pandas as pd
 
 from src.optimizer import (
+    DLC_CLASS_MERGE_TIER,
+    DLC_CLASS_TIER,
     ROLE_PROFILES,
     STAT_COLS,
     TIER_LEVEL_REQUIREMENTS,
     TIER_ORDER,
+    UNIQUE_CLASS_SCORE_BONUS,
+    UNIQUE_STORY_CLASS_TIER,
     apply_weapon_affinity_fallback,
+    base_stats_at_join_level,
     compute_roster_stat_stats,
     detect_natural_role,
+    eligible_unique_story_class_by_tier,
     format_requirement,
     is_class_eligible,
     list_eligible_classes_at_tier,
     load_character_proficiency_lookup,
     load_eligibility_lookup,
+    load_starting_level_lookup,
     load_weapon_requirements_lookup,
     reachable_tiers,
     recommend_for_character,
     recommend_path,
+    restrict_support_to_magic_classes,
     stats_for_class_at_level,
+    weapon_growth_bonus,
 )
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -57,9 +66,11 @@ WEAPON_REQ_DF = pd.read_csv(DATA_DIR / "class_weapon_requirements.csv")
 CHARACTER_WEAPON_TALENT_DF = pd.read_csv(DATA_DIR / "character_weapon_talent.csv")
 PLAYABLE_NAMES = sorted(n for n in BASE_STATS_DF["name"] if "(NPC)" not in n)
 
+STARTING_LEVEL_DF = pd.read_csv(DATA_DIR / "character_starting_level.csv")
 WEAPON_REQ_LOOKUP = load_weapon_requirements_lookup(WEAPON_REQ_DF)
 PROFICIENCY_LOOKUP = load_character_proficiency_lookup(CHARACTER_WEAPON_TALENT_DF)
 ELIGIBILITY_LOOKUP = load_eligibility_lookup(ELIGIBILITY_DF)
+STARTING_LEVEL_LOOKUP = load_starting_level_lookup(STARTING_LEVEL_DF)
 ROSTER_MEANS, ROSTER_STDS = compute_roster_stat_stats(GROWTH_RATES_DF)
 
 
@@ -278,14 +289,204 @@ class TestFullRosterSweep(unittest.TestCase):
         role_modes = [None] + list(ROLE_PROFILES.keys())
         for name in PLAYABLE_NAMES:
             for role in role_modes:
+                for include_dlc_classes in (False, True):
+                    with self.subTest(character=name, role=role, include_dlc_classes=include_dlc_classes):
+                        result = recommend_for_character(
+                            name, BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+                            role_name=role, target_level=30,
+                            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+                            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+                            starting_level_df=STARTING_LEVEL_DF, include_dlc_classes=include_dlc_classes,
+                        )
+                        self.assertIsInstance(result["path"], list)
+
+    def test_support_role_never_lands_in_a_physical_only_class(self):
+        # Every Support-role path step, across the whole roster, must be a class with real magic
+        # (Reason/Faith) access - see restrict_support_to_magic_classes. This is the direct
+        # regression test for "Mercedes' final tier is Falcon Knight for Support."
+        weapon_req_lookup = WEAPON_REQ_LOOKUP
+        for name in PLAYABLE_NAMES:
+            with self.subTest(character=name):
+                result = recommend_for_character(
+                    name, BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+                    role_name="Support", target_level=30,
+                    eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+                    weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+                    starting_level_df=STARTING_LEVEL_DF,
+                )
+                for step in result["path"]:
+                    info = weapon_req_lookup.get(step["class"])
+                    if info is not None:
+                        self.assertNotEqual(
+                            info["weapon_category"], "physical",
+                            f"{name}'s Support path picked {step['class']} at {step['tier']}, "
+                            f"which has no magic access at all",
+                        )
+
+    def test_mercedes_support_final_class_is_magic_capable(self):
+        # The exact reported case: Mercedes targeting Support should never end in Falcon Knight.
+        result = recommend_for_character(
+            "Mercedes", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Support", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF,
+        )
+        final_class = result["path"][-1]["class"]
+        self.assertNotEqual(final_class, "Falcon Knight")
+        self.assertIn(WEAPON_REQ_LOOKUP[final_class]["weapon_category"], ("magic", "hybrid"))
+
+
+class TestRestrictSupportToMagicClasses(unittest.TestCase):
+    def test_drops_physical_only_classes_for_support(self):
+        master_tier = STAT_BOOSTS_DF[STAT_BOOSTS_DF["tier"] == "Master"]
+        master_tier = master_tier[~master_tier["name"].str.contains(r"\(", regex=True)]
+        filtered = restrict_support_to_magic_classes(master_tier, "Support", WEAPON_REQ_LOOKUP)
+        self.assertNotIn("Falcon Knight", filtered["name"].tolist())
+        self.assertIn("Gremory", filtered["name"].tolist())
+
+    def test_noop_for_non_support_roles(self):
+        master_tier = STAT_BOOSTS_DF[STAT_BOOSTS_DF["tier"] == "Master"]
+        filtered = restrict_support_to_magic_classes(master_tier, "Physical Attacker", WEAPON_REQ_LOOKUP)
+        self.assertEqual(len(filtered), len(master_tier))
+
+    def test_noop_without_weapon_req_lookup(self):
+        master_tier = STAT_BOOSTS_DF[STAT_BOOSTS_DF["tier"] == "Master"]
+        filtered = restrict_support_to_magic_classes(master_tier, "Support", {})
+        self.assertEqual(len(filtered), len(master_tier))
+
+
+class TestUniqueClassSplicing(unittest.TestCase):
+    def test_eligible_unique_story_class_by_tier_only_for_locked_characters(self):
+        self.assertEqual(
+            eligible_unique_story_class_by_tier("Edelgard", ELIGIBILITY_LOOKUP),
+            {"Advanced": "Armored Lord", "Master": "Emperor"},
+        )
+        self.assertEqual(eligible_unique_story_class_by_tier("Bernadetta", ELIGIBILITY_LOOKUP), {})
+
+    def test_edelgard_physical_attacker_path_uses_her_own_unique_classes(self):
+        result = recommend_for_character(
+            "Edelgard", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Physical Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF,
+        )
+        by_tier = {step["tier"]: step["class"] for step in result["path"]}
+        self.assertEqual(by_tier["Advanced"], "Armored Lord")
+        self.assertEqual(by_tier["Master"], "Emperor")
+        self.assertTrue(
+            next(s for s in result["path"] if s["tier"] == "Master")["is_unique_class"]
+        )
+
+    def test_unique_classes_never_leak_to_ineligible_characters(self):
+        for name in PLAYABLE_NAMES:
+            if name in ("Protagonist", "Edelgard", "Dimitri", "Claude"):
+                continue
+            for role in ROLE_PROFILES:
                 with self.subTest(character=name, role=role):
                     result = recommend_for_character(
                         name, BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
                         role_name=role, target_level=30,
                         eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
                         weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+                        starting_level_df=STARTING_LEVEL_DF,
                     )
-                    self.assertIsInstance(result["path"], list)
+                    picked_classes = {step["class"] for step in result["path"]}
+                    self.assertTrue(picked_classes.isdisjoint(UNIQUE_STORY_CLASS_TIER))
+
+    def test_bonus_is_large_enough_to_win_a_negative_raw_score(self):
+        # Armored Lord scores negative for Physical Attacker (its Spd boost is -3) - the additive
+        # bonus, not a multiplier, is what has to carry it past Swordmaster/Brigand etc.
+        self.assertGreater(UNIQUE_CLASS_SCORE_BONUS, 5.0)
+
+
+class TestWeaponGrowthBonus(unittest.TestCase):
+    def test_bonus_when_class_matches_character_proficiency(self):
+        # Felix's own starting proficiency is Sword.
+        bonus = weapon_growth_bonus("Myrmidon", WEAPON_REQ_LOOKUP, PROFICIENCY_LOOKUP["Felix"])
+        self.assertGreater(bonus, 0.0)
+
+    def test_no_bonus_when_no_overlap(self):
+        bonus = weapon_growth_bonus("Monk", WEAPON_REQ_LOOKUP, PROFICIENCY_LOOKUP["Felix"])
+        self.assertEqual(bonus, 0.0)
+
+    def test_no_bonus_without_proficiency_data(self):
+        self.assertEqual(weapon_growth_bonus("Myrmidon", WEAPON_REQ_LOOKUP, None), 0.0)
+
+    def test_no_bonus_for_unknown_class(self):
+        self.assertEqual(weapon_growth_bonus("Not A Real Class", WEAPON_REQ_LOOKUP, {"Sword"}), 0.0)
+
+
+class TestJoinLevel(unittest.TestCase):
+    def test_house_students_join_at_level_one(self):
+        for name in ("Protagonist", "Edelgard", "Dimitri", "Claude", "Mercedes"):
+            self.assertEqual(STARTING_LEVEL_LOOKUP[name], 1)
+
+    def test_late_recruit_has_a_higher_join_level(self):
+        self.assertGreater(STARTING_LEVEL_LOOKUP["Catherine"], 1)
+
+    def test_base_stats_at_join_level_one_is_unchanged(self):
+        base_row = BASE_STATS_DF[BASE_STATS_DF["name"] == "Mercedes"].iloc[0]
+        growth_row = GROWTH_RATES_DF[GROWTH_RATES_DF["name"] == "Mercedes"].iloc[0]
+        result = base_stats_at_join_level(base_row, growth_row, 1)
+        for stat in STAT_COLS:
+            self.assertEqual(result[stat], round(float(base_row[stat]), 1))
+
+    def test_base_stats_at_higher_join_level_adds_expected_growth(self):
+        base_row = BASE_STATS_DF[BASE_STATS_DF["name"] == "Catherine"].iloc[0]
+        growth_row = GROWTH_RATES_DF[GROWTH_RATES_DF["name"] == "Catherine"].iloc[0]
+        result = base_stats_at_join_level(base_row, growth_row, 15)
+        expected_str = round(float(base_row["Str"]) + (float(growth_row["Str"]) / 100) * 14, 1)
+        self.assertEqual(result["Str"], expected_str)
+        self.assertGreaterEqual(result["Str"], base_row["Str"])
+
+    def test_target_level_below_join_level_is_floored(self):
+        result = recommend_for_character(
+            "Catherine", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            target_level=5,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF,
+        )
+        self.assertEqual(result["requested_target_level"], 5)
+        self.assertEqual(result["join_level"], STARTING_LEVEL_LOOKUP["Catherine"])
+        self.assertEqual(result["expected_stats_at_level"], STARTING_LEVEL_LOOKUP["Catherine"])
+
+    def test_without_starting_level_df_everyone_is_level_one(self):
+        result = recommend_for_character(
+            "Catherine", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF, target_level=30,
+        )
+        self.assertEqual(result["join_level"], 1)
+
+
+class TestDlcClasses(unittest.TestCase):
+    def test_dlc_classes_absent_by_default(self):
+        path = recommend_path(
+            STAT_BOOSTS_DF, "Magic Attacker", target_level=30,
+            character_name="Lysithea", eligibility_lookup=ELIGIBILITY_LOOKUP,
+            character_gender="Female", weapon_req_lookup=WEAPON_REQ_LOOKUP,
+        )
+        dlc_class_names = set(STAT_BOOSTS_DF[STAT_BOOSTS_DF["tier"] == DLC_CLASS_TIER]["name"])
+        picked = {step["class"] for step in path}
+        self.assertTrue(picked.isdisjoint(dlc_class_names))
+
+    def test_dlc_classes_available_at_advanced_when_opted_in(self):
+        options = list_eligible_classes_at_tier(
+            DLC_CLASS_MERGE_TIER, STAT_BOOSTS_DF,
+            character_name="Lysithea", eligibility_lookup=ELIGIBILITY_LOOKUP, character_gender="Female",
+            include_dlc_classes=True,
+        )
+        self.assertIn("Valkyrie", options)
+
+    def test_dlc_classes_respect_gender_lock(self):
+        options = list_eligible_classes_at_tier(
+            DLC_CLASS_MERGE_TIER, STAT_BOOSTS_DF,
+            character_name="Caspar", eligibility_lookup=ELIGIBILITY_LOOKUP, character_gender="Male",
+            include_dlc_classes=True,
+        )
+        self.assertNotIn("Valkyrie", options)  # Female-locked
+        self.assertIn("Trickster", options)  # unrestricted
 
 
 if __name__ == "__main__":

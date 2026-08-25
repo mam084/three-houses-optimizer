@@ -20,6 +20,7 @@ from src.team_builder import (
     BLACK_EAGLES_SILVER_SNOW,
     DLC_HOUSE,
     REAL_ROUTES,
+    ROUTE_LORD,
     SILVER_SNOW_LOST_CHARACTERS,
     build_balanced_team,
     build_team_with_paths,
@@ -27,6 +28,7 @@ from src.team_builder import (
     get_candidate_pool,
     is_cross_house_recruitable,
     load_recruitment_lookup,
+    mandatory_names_for_route,
 )
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -39,6 +41,7 @@ CHARACTER_GENDER_DF = pd.read_csv(DATA_DIR / "character_gender.csv")
 WEAPON_REQ_DF = pd.read_csv(DATA_DIR / "class_weapon_requirements.csv")
 CHARACTER_WEAPON_TALENT_DF = pd.read_csv(DATA_DIR / "character_weapon_talent.csv")
 RECRUITMENT_REQUIREMENTS_DF = pd.read_csv(DATA_DIR / "recruitment_requirements.csv")
+STARTING_LEVEL_DF = pd.read_csv(DATA_DIR / "character_starting_level.csv")
 RECRUITMENT_LOOKUP = load_recruitment_lookup(RECRUITMENT_REQUIREMENTS_DF)
 PLAYABLE_NAMES = sorted(n for n in BASE_STATS_DF["name"] if "(NPC)" not in n)
 
@@ -268,6 +271,73 @@ class TestRouteSweep(unittest.TestCase):
                             character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
                         )
                         self.assertIsInstance(team, list)
+
+
+class TestMandatoryNames(unittest.TestCase):
+    def test_full_roster_has_no_mandatory_names(self):
+        self.assertEqual(mandatory_names_for_route("Full roster"), [])
+        self.assertEqual(mandatory_names_for_route(None), [])
+
+    def test_each_real_route_forces_protagonist_and_its_own_lord(self):
+        for route in REAL_ROUTES:
+            with self.subTest(route=route):
+                mandatory = mandatory_names_for_route(route)
+                self.assertEqual(mandatory, ["Protagonist", ROUTE_LORD[route]])
+
+    def test_both_black_eagles_routes_share_edelgard_as_lord(self):
+        self.assertEqual(
+            mandatory_names_for_route(BLACK_EAGLES_CRIMSON_FLOWER),
+            mandatory_names_for_route(BLACK_EAGLES_SILVER_SNOW),
+        )
+
+    def test_team_built_with_mandatory_names_always_includes_them(self):
+        route = "Golden Deer"
+        candidates = get_candidate_pool(BASE_STATS_DF, PLAYABLE_NAMES, route=route)
+        mandatory = mandatory_names_for_route(route)
+        team = build_balanced_team(candidates, GROWTH_RATES_DF, team_size=4, must_include=mandatory)
+        team_names = [m["character"] for m in team]
+        for name in mandatory:
+            self.assertIn(name, team_names)
+
+
+class TestLockedBuilds(unittest.TestCase):
+    def test_locked_build_is_used_instead_of_a_fresh_recommendation(self):
+        locked_path = [{"tier": "Beginner", "class": "Fighter", "score": 1.0, "why": "test",
+                         "requirement": None, "is_unique_class": False}]
+        locked_stats = {stat: 99.9 for stat in ("HP", "Str", "Mag", "Dex", "Spd", "Lck", "Def", "Res", "Cha")}
+        team = build_team_with_paths(
+            ["Bernadetta", "Ashe", "Ignatz"], BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            team_size=3, target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF,
+            locked_builds={"Bernadetta": {
+                "path": locked_path, "final_class": "Fighter", "expected_final_stats": locked_stats,
+                "eligible_unique_classes": [],
+            }},
+        )
+        member = next(m for m in team if m["character"] == "Bernadetta")
+        self.assertEqual(member["final_class"], "Fighter")
+        self.assertEqual(member["expected_final_stats"], locked_stats)
+        self.assertIn("imported build", member["why"])
+
+    def test_characters_without_a_locked_build_are_unaffected(self):
+        team = build_team_with_paths(
+            ["Bernadetta", "Ashe", "Ignatz"], BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            team_size=3, target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF,
+            locked_builds={"Bernadetta": {
+                "path": [{"tier": "Beginner", "class": "Fighter", "score": 1.0, "why": "test",
+                          "requirement": None, "is_unique_class": False}],
+                "final_class": "Fighter", "expected_final_stats": {}, "eligible_unique_classes": [],
+            }},
+        )
+        others = [m for m in team if m["character"] != "Bernadetta"]
+        for member in others:
+            self.assertNotIn("imported build", member["why"])
+            self.assertTrue(member["path"])  # recomputed normally
 
 
 if __name__ == "__main__":

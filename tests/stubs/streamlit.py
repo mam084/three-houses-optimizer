@@ -136,8 +136,19 @@ def multiselect(label, options, format_func=None, key=None, help=None):
     return _override(key or label, [])
 
 
-def button(label, type=None, help=None):
-    return _override(label, False)
+def button(label, type=None, help=None, key=None, on_click=None, args=None, kwargs=None):
+    clicked = _override(key or label, False)
+    if clicked and on_click is not None:
+        on_click(*(args or ()), **(kwargs or {}))
+    return clicked
+
+
+def rerun():
+    # Real Streamlit aborts the current script run and restarts it; the
+    # stub has no script-run loop to restart, so this is just a no-op -
+    # callers that check session_state right after triggering a rerun
+    # (rather than relying on the rerun itself) still see correct state.
+    pass
 
 
 def plotly_chart(fig, use_container_width=True, key=None):
