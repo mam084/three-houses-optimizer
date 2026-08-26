@@ -80,6 +80,19 @@ DEFAULT_PORTRAIT_COLOR = "#2b2b3a"
 # from the option list.
 DANCER_INELIGIBLE_CHARACTERS = {"Protagonist"}
 
+# Byleth (the Protagonist)'s gender is a player choice at the very start of
+# the game - data/character_gender.csv already marks them "Any" so this
+# choice never blocks a gender-locked class either way (see
+# is_class_eligible's docstring). It has no effect on stats or eligibility,
+# but it is the one thing that determines which portrait actually depicts
+# them, for anyone who's added their own art per assets/portraits/README.md.
+# So unlike every other character - whose single portrait file is just
+# their lowercased name - Byleth's is resolved from one of these two slugs
+# plus the selector rendered once in main() and threaded down through
+# render_character_tab/render_team_tab/render_team into render_portrait.
+BYLETH_PORTRAIT_SLUGS = {"Male": "byleth_m", "Female": "byleth_f"}
+DEFAULT_BYLETH_GENDER = "Male"
+
 st.set_page_config(page_title="Three Houses Class Optimizer", page_icon="⚔️", layout="wide")
 
 
@@ -132,21 +145,34 @@ def display_name(name: str, dlc_names: set[str]) -> str:
     return f"{name} (DLC)" if name in dlc_names else name
 
 
-def get_portrait_path(character_name: str) -> Path | None:
+def get_portrait_path(character_name: str, byleth_gender: str | None = None) -> Path | None:
     """
     Look up a local portrait image for a character, if one has been placed
     in assets/portraits/ (see that folder's README - actual character art
     isn't shipped in this repo, since Three Houses portraits are Nintendo/
     Intelligent Systems IP and not this project's to redistribute; add your
     own from a source you have the rights to use).
+
+    For the Protagonist specifically, byleth_gender ("Male"/"Female", from
+    BYLETH_PORTRAIT_SLUGS - the selector in main() supplies this) is tried
+    first as byleth_m/byleth_f, since Byleth's in-game portrait is a player
+    choice rather than one fixed image the way every other character's is.
+    A plain protagonist.* file - the ordinary lowercased-name slug every
+    other character uses - is still checked as a fallback, for anyone who
+    added one before splitting Byleth's art by gender, or who doesn't care
+    to. byleth_gender is ignored for every other character.
     """
     if not PORTRAIT_DIR.exists():
         return None
-    slug = character_name.lower().replace(" ", "_").replace("(", "").replace(")", "")
-    for ext in (".png", ".jpg", ".jpeg", ".webp"):
-        candidate = PORTRAIT_DIR / f"{slug}{ext}"
-        if candidate.exists():
-            return candidate
+    slugs = [character_name.lower().replace(" ", "_").replace("(", "").replace(")", "")]
+    if character_name == "Protagonist":
+        gender_slug = BYLETH_PORTRAIT_SLUGS.get(byleth_gender or DEFAULT_BYLETH_GENDER)
+        slugs.insert(0, gender_slug)
+    for slug in slugs:
+        for ext in (".png", ".jpg", ".jpeg", ".webp"):
+            candidate = PORTRAIT_DIR / f"{slug}{ext}"
+            if candidate.exists():
+                return candidate
     return None
 
 
@@ -155,7 +181,7 @@ def get_house_lookup(base_stats_df: pd.DataFrame) -> dict:
     return dict(zip(base_stats_df["name"], base_stats_df["house"]))
 
 
-def render_portrait(character_name: str, house: str | None = None, width: int = 96):
+def render_portrait(character_name: str, house: str | None = None, width: int = 96, byleth_gender: str | None = None):
     """
     Render a character's portrait. If an image has been placed in
     assets/portraits/ for them (see get_portrait_path/that folder's README),
@@ -168,9 +194,10 @@ def render_portrait(character_name: str, house: str | None = None, width: int = 
     character belongs to - without redistributing anyone's IP. `house`
     should be that character's data/character_base_stats.csv "house" value
     (see get_house_lookup); omitted or unrecognized falls back to
-    DEFAULT_PORTRAIT_COLOR.
+    DEFAULT_PORTRAIT_COLOR. `byleth_gender` only matters when character_name
+    is the Protagonist - see get_portrait_path.
     """
-    portrait = get_portrait_path(character_name)
+    portrait = get_portrait_path(character_name, byleth_gender=byleth_gender)
     if portrait:
         st.image(str(portrait), width=width)
     else:
@@ -406,6 +433,7 @@ def render_stat_charts(
 
 def render_team(
     team: list[dict], dlc_names: set[str], house_lookup: dict | None = None, dancer: str | None = None,
+    byleth_gender: str | None = None,
 ):
     """
     dancer: the character name (if any) assigned this team's single Dancer
@@ -417,6 +445,10 @@ def render_team(
     is deliberately a single roster-wide assignment, not a per-member
     option - the selectbox that produces this value in render_team_tab can
     only ever hold one name at a time.
+
+    byleth_gender: passed straight through to render_portrait for whichever
+    member is the Protagonist (Byleth is force-deployed on every route, so
+    in practice this fires on almost every team) - see get_portrait_path.
     """
     st.subheader(f"Recommended Team ({len(team)})")
 
@@ -431,7 +463,10 @@ def render_team(
         with st.container(border=True):
             col1, col2, col3 = st.columns([1, 1, 3])
             with col1:
-                render_portrait(member["character"], house=(house_lookup or {}).get(member["character"]))
+                render_portrait(
+                    member["character"], house=(house_lookup or {}).get(member["character"]),
+                    byleth_gender=byleth_gender,
+                )
             with col2:
                 st.markdown(f"**{display_name(member['character'], dlc_names)}**")
                 st.caption(f"{member['role']} (score {member['score']})")
@@ -552,7 +587,8 @@ def render_class_explorer_tab(stat_boosts_df: pd.DataFrame, weapon_req_df: pd.Da
 
 def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
                           weapon_req_df, character_weapon_talent_df, starting_level_df, class_growth_df,
-                          class_base_stats_df, character_relics_df, playable_names, dlc_names):
+                          class_base_stats_df, character_relics_df, playable_names, dlc_names,
+                          byleth_gender=None):
     st.caption(
         "Pick a character and see a recommended class path - either toward their "
         "natural strengths, or a role you choose. Only classes that character can "
@@ -599,7 +635,7 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
     with col_portrait:
         character_house = base_stats_df.loc[base_stats_df["name"] == character, "house"].iloc[0] \
             if (base_stats_df["name"] == character).any() else None
-        render_portrait(character, house=character_house, width=80)
+        render_portrait(character, house=character_house, width=80, byleth_gender=byleth_gender)
     with col_info:
         if role_name is None:
             st.info(
@@ -764,7 +800,8 @@ def _import_build(
 
 def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
                      weapon_req_df, character_weapon_talent_df, recruitment_requirements_df, starting_level_df,
-                     class_growth_df, class_base_stats_df, character_relics_df, playable_names, dlc_names):
+                     class_growth_df, class_base_stats_df, character_relics_df, playable_names, dlc_names,
+                     byleth_gender=None):
     st.caption(
         "Builds a balanced team from a candidate pool by covering complementary "
         "roles, rather than just stacking the strongest individuals."
@@ -939,7 +976,10 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
             )
             dancer = dancer_choice if dancer_choice != "None" else None
 
-            render_team(team, dlc_names, house_lookup=get_house_lookup(base_stats_df), dancer=dancer)
+            render_team(
+                team, dlc_names, house_lookup=get_house_lookup(base_stats_df), dancer=dancer,
+                byleth_gender=byleth_gender,
+            )
 
 
 def main():
@@ -951,7 +991,26 @@ def main():
     playable_names = get_playable_names(base_stats_df)
     dlc_names = get_dlc_names(base_stats_df)
 
-    st.title("⚔️ Three Houses Class Optimizer")
+    title_col, byleth_gender_col = st.columns([5, 1])
+    with title_col:
+        st.title("⚔️ Three Houses Class Optimizer")
+    with byleth_gender_col:
+        # Byleth's portrait is the one piece of art in this whole app that
+        # depends on a choice the game itself hands the player, rather than
+        # being fixed per character - see BYLETH_PORTRAIT_SLUGS. Rendered
+        # once here (not per-tab) since Byleth is force-deployed on every
+        # route and selectable directly in the Character Optimizer, so the
+        # choice should carry across both tabs instead of being asked twice
+        # or reset on every tab switch.
+        byleth_gender = st.selectbox(
+            "Byleth's portrait", options=list(BYLETH_PORTRAIT_SLUGS.keys()),
+            index=list(BYLETH_PORTRAIT_SLUGS.keys()).index(DEFAULT_BYLETH_GENDER),
+            key="byleth_portrait_gender",
+            help="Only affects which portrait is shown if you've added your own "
+                 "byleth_m/byleth_f art (see assets/portraits/README.md) - Byleth's "
+                 "gender is a player choice in-game and never affects stats or class "
+                 "eligibility either way.",
+        )
 
     tab1, tab2, tab3 = st.tabs(["Character Optimizer", "Team Builder", "Class Explorer"])
     with tab1:
@@ -959,12 +1018,14 @@ def main():
             base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
             weapon_req_df, character_weapon_talent_df, starting_level_df, class_growth_df,
             class_base_stats_df, character_relics_df, playable_names, dlc_names,
+            byleth_gender=byleth_gender,
         )
     with tab2:
         render_team_tab(
             base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
             weapon_req_df, character_weapon_talent_df, recruitment_requirements_df, starting_level_df,
             class_growth_df, class_base_stats_df, character_relics_df, playable_names, dlc_names,
+            byleth_gender=byleth_gender,
         )
     with tab3:
         render_class_explorer_tab(stat_boosts_df, weapon_req_df, class_growth_df)

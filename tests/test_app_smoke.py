@@ -22,6 +22,7 @@ real package on sys.path.)
 """
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -53,6 +54,8 @@ class TestAppSmoke(unittest.TestCase):
             st.SELECTBOX_CALLS.clear()
         if hasattr(st, "CAPTION_CALLS"):
             st.CAPTION_CALLS.clear()
+        if hasattr(st, "IMAGE_CALLS"):
+            st.IMAGE_CALLS.clear()
         (
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
@@ -375,6 +378,143 @@ class TestAppSmoke(unittest.TestCase):
             "explorer_class_a": "Gremory", "explorer_class_b": "Bishop", "explorer_include_dlc": True,
         }
         app.render_class_explorer_tab(self.stat_boosts_df, self.weapon_req_df, self.class_growth_df)
+
+
+@unittest.skipIf(app is None, f"could not import app.py / streamlit: {IMPORT_ERROR}")
+class TestBylethPortraitGender(unittest.TestCase):
+    """
+    Byleth (the Protagonist)'s in-game portrait is a player choice, not a
+    fixed trait the way it is for every other character - see
+    app.BYLETH_PORTRAIT_SLUGS and get_portrait_path's docstring. These
+    exercise get_portrait_path directly against a scratch assets/portraits/
+    directory (swapped in for app.PORTRAIT_DIR and restored afterward),
+    since portrait file resolution doesn't depend on any character/class
+    data - no need for the full app.load_data() setup TestAppSmoke uses.
+    """
+
+    def setUp(self):
+        self._real_portrait_dir = app.PORTRAIT_DIR
+        self._tmp_dir = tempfile.TemporaryDirectory()
+        app.PORTRAIT_DIR = Path(self._tmp_dir.name)
+
+    def tearDown(self):
+        app.PORTRAIT_DIR = self._real_portrait_dir
+        self._tmp_dir.cleanup()
+
+    def _touch(self, filename):
+        (app.PORTRAIT_DIR / filename).write_bytes(b"")
+
+    def test_resolves_byleth_m_for_male(self):
+        self._touch("byleth_m.png")
+        self._touch("byleth_f.png")
+        self.assertEqual(app.get_portrait_path("Protagonist", byleth_gender="Male").name, "byleth_m.png")
+
+    def test_resolves_byleth_f_for_female(self):
+        self._touch("byleth_m.png")
+        self._touch("byleth_f.png")
+        self.assertEqual(app.get_portrait_path("Protagonist", byleth_gender="Female").name, "byleth_f.png")
+
+    def test_defaults_to_male_when_gender_omitted(self):
+        self._touch("byleth_m.png")
+        self._touch("byleth_f.png")
+        self.assertEqual(app.get_portrait_path("Protagonist").name, "byleth_m.png")
+
+    def test_falls_back_to_plain_protagonist_file(self):
+        # No gender-specific files at all - someone who added one image before this
+        # distinction existed, or who doesn't want to split it, should still see it.
+        self._touch("protagonist.png")
+        self.assertEqual(app.get_portrait_path("Protagonist", byleth_gender="Female").name, "protagonist.png")
+
+    def test_gender_specific_file_wins_over_plain_protagonist_file(self):
+        self._touch("protagonist.png")
+        self._touch("byleth_f.png")
+        self.assertEqual(app.get_portrait_path("Protagonist", byleth_gender="Female").name, "byleth_f.png")
+
+    def test_missing_gender_file_falls_back_without_showing_the_wrong_gender(self):
+        # Only byleth_m.png exists; asking for Female should land on the plain
+        # protagonist.png fallback, never on byleth_m.png (the wrong gender).
+        self._touch("byleth_m.png")
+        self._touch("protagonist.png")
+        self.assertEqual(app.get_portrait_path("Protagonist", byleth_gender="Female").name, "protagonist.png")
+
+    def test_byleth_gender_is_ignored_for_every_other_character(self):
+        self._touch("edelgard.png")
+        self.assertEqual(app.get_portrait_path("Edelgard", byleth_gender="Female").name, "edelgard.png")
+
+    def test_no_file_at_all_returns_none(self):
+        self.assertIsNone(app.get_portrait_path("Protagonist", byleth_gender="Male"))
+
+
+@unittest.skipIf(app is None, f"could not import app.py / streamlit: {IMPORT_ERROR}")
+class TestBylethPortraitGenderThroughRenderFunctions(unittest.TestCase):
+    """
+    End-to-end coverage through the real render functions (not just
+    get_portrait_path directly) - confirms byleth_gender actually threads
+    through render_character_tab / render_team_tab / render_team /
+    render_portrait to st.image(), using the IMAGE_CALLS capture added to
+    tests/stubs/streamlit.py alongside this feature.
+
+    Deliberately a plain TestCase with its own minimal setUp (mirroring
+    TestAppSmoke.setUp's data loading) rather than subclassing TestAppSmoke
+    - subclassing it would also inherit and re-run every one of its
+    test_* methods under this class's swapped PORTRAIT_DIR, which isn't
+    what this class is for.
+    """
+
+    def setUp(self):
+        st.session_state.clear()
+        st.WIDGET_OVERRIDES = {}
+        if hasattr(st, "IMAGE_CALLS"):
+            st.IMAGE_CALLS.clear()
+        (
+            self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
+            self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
+            self.recruitment_requirements_df, self.starting_level_df, self.class_growth_df,
+            self.class_base_stats_df, self.character_relics_df,
+        ) = app.load_data()
+        self.playable_names = app.get_playable_names(self.base_stats_df)
+        self.dlc_names = app.get_dlc_names(self.base_stats_df)
+
+        self._real_portrait_dir = app.PORTRAIT_DIR
+        self._tmp_dir = tempfile.TemporaryDirectory()
+        app.PORTRAIT_DIR = Path(self._tmp_dir.name)
+        (app.PORTRAIT_DIR / "byleth_m.png").write_bytes(b"")
+        (app.PORTRAIT_DIR / "byleth_f.png").write_bytes(b"")
+
+    def tearDown(self):
+        app.PORTRAIT_DIR = self._real_portrait_dir
+        self._tmp_dir.cleanup()
+
+    def test_character_tab_shows_the_selected_gender_portrait(self):
+        if not hasattr(st, "IMAGE_CALLS"):
+            self.skipTest("stub-only assertion - IMAGE_CALLS isn't part of the real streamlit API")
+        st.WIDGET_OVERRIDES = {"char_select": "Protagonist"}
+        app.render_character_tab(
+            self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
+            self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
+            self.starting_level_df, self.class_growth_df, self.class_base_stats_df,
+            self.character_relics_df, self.playable_names, self.dlc_names,
+            byleth_gender="Female",
+        )
+        self.assertTrue(any("byleth_f.png" in path for path in st.IMAGE_CALLS))
+        self.assertFalse(any("byleth_m.png" in path for path in st.IMAGE_CALLS))
+
+    def test_team_tab_shows_the_selected_gender_portrait_for_byleth(self):
+        if not hasattr(st, "IMAGE_CALLS"):
+            self.skipTest("stub-only assertion - IMAGE_CALLS isn't part of the real streamlit API")
+        st.WIDGET_OVERRIDES = {
+            "team_route": "Golden Deer", "team_size": 4, "team_level": 30, "Build Team": True,
+        }
+        app.render_team_tab(
+            self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
+            self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
+            self.recruitment_requirements_df, self.starting_level_df, self.class_growth_df,
+            self.class_base_stats_df, self.character_relics_df, self.playable_names, self.dlc_names,
+            byleth_gender="Female",
+        )
+        # Byleth is force-deployed on every route (mandatory_names_for_route), so a
+        # Golden Deer team of 4 always includes the Protagonist and their portrait.
+        self.assertTrue(any("byleth_f.png" in path for path in st.IMAGE_CALLS))
 
 
 if __name__ == "__main__":

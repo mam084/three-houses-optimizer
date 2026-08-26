@@ -93,8 +93,12 @@ def stop():
     raise SystemExit("st.stop() called")
 
 
+IMAGE_CALLS = []  # first positional arg of every image() call this run - cleared per-test, see test_app_smoke.py
+
+
 def image(*a, **k):
-    pass
+    if a:
+        IMAGE_CALLS.append(a[0])
 
 
 class _Block:
