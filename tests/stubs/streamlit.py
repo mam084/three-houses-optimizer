@@ -27,6 +27,7 @@ class _SessionState(dict):
 session_state = _SessionState()
 WIDGET_OVERRIDES = {}  # key/label -> forced return value, set by the test before calling into app.py
 PLOTLY_CALLS = []  # (key, fig) for every plotly_chart() call this run - cleared per-test, see test_app_smoke.py
+query_params = {}  # plain dict stand-in for real Streamlit's st.query_params mapping - see app.query_param_str
 
 
 def _override(key, default):
@@ -77,7 +78,11 @@ def info(x):
     pass
 
 
+WARNING_CALLS = []  # every warning() call's text this run - cleared per-test, see test_app_smoke.py
+
+
 def warning(x, icon=None):
+    WARNING_CALLS.append(x)
     print("st.warning:", x)
 
 
@@ -138,6 +143,12 @@ SELECTBOX_CALLS = []  # (key or label, options list) for every selectbox() call 
 
 
 def selectbox(label, options, index=0, key=None, format_func=None, help=None):
+    SELECTBOX_CALLS.append((key or label, list(options)))
+    default = options[index] if options else None
+    return _override(key or label, default)
+
+
+def radio(label, options, index=0, key=None, format_func=None, help=None, horizontal=False):
     SELECTBOX_CALLS.append((key or label, list(options)))
     default = options[index] if options else None
     return _override(key or label, default)

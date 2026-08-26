@@ -1,0 +1,45 @@
+name: Tests
+
+# Round 6 action item: "Add CI (GitHub Actions running the test suite on
+# every push)". Runs the whole stdlib-unittest suite (tests/test_optimizer.py,
+# tests/test_team_builder.py, tests/test_app_smoke.py - 216 tests as of this
+# round) against real pandas/numpy/streamlit/plotly/Pillow installs, on every
+# push and pull request, across the Python versions the project has actually
+# been developed against.
+#
+# No pytest dependency is introduced here on purpose - the project uses
+# plain `unittest`, and `python -m unittest discover` is exactly what a
+# contributor runs locally (see README.md), so CI exercises the same command
+# rather than a parallel one that could drift from it.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run test suite
+        run: python -m unittest discover -s tests -v

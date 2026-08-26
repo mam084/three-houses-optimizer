@@ -10,6 +10,8 @@ Run with:
     streamlit run app.py
 """
 
+import base64
+import io
 from pathlib import Path
 
 import numpy as np
@@ -22,14 +24,21 @@ from src.optimizer import (
     ROLE_PROFILES,
     STAT_COLS,
     TIER_ORDER,
+    combined_requirements_for_classes,
+    compute_roster_stat_stats,
+    format_combined_requirements,
     format_requirement,
     list_eligible_classes_at_tier,
     load_character_proficiency_lookup,
+    load_character_relic_lookup,
     load_class_base_stats_lookup,
     load_class_growth_lookup,
     load_eligibility_lookup,
     load_weapon_requirements_lookup,
+    path_weapon_switch_warning,
     recommend_for_character,
+    role_relevant_stat_deltas,
+    score_all_roles,
     score_class_for_role,
     score_growth_for_role,
     stats_for_selected_path,
@@ -44,6 +53,11 @@ from src.team_builder import (
     load_recruitment_lookup,
     mandatory_names_for_route,
 )
+
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover - Pillow ships with Streamlit itself, but degrade gracefully
+    Image = None
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 PORTRAIT_DIR = Path(__file__).resolve().parent / "assets" / "portraits"
@@ -93,7 +107,41 @@ DANCER_INELIGIBLE_CHARACTERS = {"Protagonist"}
 BYLETH_PORTRAIT_SLUGS = {"Male": "byleth_m", "Female": "byleth_f"}
 DEFAULT_BYLETH_GENDER = "Male"
 
-st.set_page_config(page_title="Three Houses Class Optimizer", page_icon="⚔️", layout="wide")
+
+def resolve_character_gender(character_name: str, character_gender_df: pd.DataFrame, byleth_gender: str | None = None) -> str | None:
+    """
+    A character's gender for ELIGIBILITY purposes - character_gender_df's
+    own recorded value for everyone, EXCEPT the Protagonist, where the
+    actual player-chosen gender (byleth_gender, "Male"/"Female" - the same
+    selector that already picks Byleth's portrait) is used instead of the
+    CSV's "Any".
+
+    This matters because "Any" alone (is_class_eligible's own graceful-
+    degradation value, correct as a permanent FACT about Byleth - there is
+    no fixed gender the way every other character has one) also happens to
+    mean "never blocked by a gender-locked class either way," which is
+    right for "does this class exist for Byleth at all" but wrong for "is
+    THIS Byleth, after the player's actual gender choice, eligible for it" -
+    the reported bug ("War Master is male-only, Falcon Knight is
+    female-only, so it should depend on the gender the player picked")
+    was exactly this: Byleth was being offered (and even recommended) both,
+    regardless of which portrait/gender was actually selected. Threading
+    the real choice through here makes Byleth's gender-locked-class
+    eligibility behave exactly like everyone else's fixed gender does.
+
+    Used everywhere in this file that needs a character's gender for
+    eligibility (the call into recommend_for_character, the mix-and-match
+    option list, import, Team Builder), not just one call site, so every
+    gender-aware check in the UI agrees with what was actually recommended.
+    """
+    if character_name == "Protagonist":
+        return byleth_gender or DEFAULT_BYLETH_GENDER
+    gender_row = character_gender_df[character_gender_df["name"] == character_name]
+    if not gender_row.empty:
+        return gender_row.iloc[0]["gender"]
+    return None
+
+st.set_page_config(page_title="Three Houses Class Optimizer", layout="wide")
 
 
 @st.cache_data
@@ -128,6 +176,58 @@ def load_data() -> tuple[pd.DataFrame, ...]:
         pd.read_csv(DATA_DIR / "class_base_stats.csv"),
         pd.read_csv(DATA_DIR / "character_relics.csv"),
     )
+
+
+def query_param_str(key: str, default: str | None = None) -> str | None:
+    """
+    Read one query-string param (e.g. `?character=Bernadetta` -> "Bernadetta")
+    via st.query_params, for prefilling a widget's default on first load -
+    see render_character_tab's use of this for "make results shareable ...
+    encode a build in the URL." Returns default if st.query_params isn't
+    available at all (an older Streamlit, or the test stub - this feature
+    degrades to "no shareable link," not a crash) or the key is absent.
+    """
+    try:
+        params = st.query_params
+    except Exception:
+        return default
+    value = params.get(key, default)
+    if isinstance(value, list):  # a couple of Streamlit versions return a list for a repeated param
+        value = value[0] if value else default
+    return value
+
+
+def query_param_int(key: str, default: int) -> int:
+    """Integer counterpart to query_param_str (e.g. `?level=25` -> 25) - falls back to default on anything unparsable."""
+    raw = query_param_str(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def sync_share_query_params(character: str, role_choice: str, target_level: int) -> None:
+    """
+    Mirror the Character Optimizer tab's current character/role/level
+    selection into the browser's own URL query string via st.query_params,
+    so the address bar itself becomes a shareable/bookmarkable link back to
+    this exact selection (Streamlit reruns the whole script on every widget
+    change, so this runs - and stays current - on every interaction, not
+    just once at load). Mix-and-match tier overrides aren't included here -
+    see the README's Known Simplifications for why that's a deliberately
+    scoped-down version of "shareable," not an oversight.
+
+    A no-op (not a crash) wherever st.query_params isn't available - see
+    query_param_str.
+    """
+    try:
+        st.query_params["character"] = character
+        st.query_params["role"] = role_choice
+        st.query_params["level"] = str(target_level)
+    except Exception:
+        pass
 
 
 def get_playable_names(base_stats_df: pd.DataFrame) -> list[str]:
@@ -181,25 +281,126 @@ def get_house_lookup(base_stats_df: pd.DataFrame) -> dict:
     return dict(zip(base_stats_df["name"], base_stats_df["house"]))
 
 
+# How much bigger than its CSS display width a portrait is rendered at
+# before being embedded, so it looks crisp on a high-DPI/retina display
+# instead of blurry - a portrait shown at width=96 is actually encoded at
+# 96 * PORTRAIT_RENDER_SCALE px, then constrained back down to 96px via
+# CSS, letting the BROWSER's own high-quality downscaling do the final
+# sizing rather than whatever resize path an image-serving library takes
+# internally. See render_portrait/_load_portrait_data_uri for the "some
+# portraits looked blurry" fix this is part of.
+PORTRAIT_RENDER_SCALE = 3
+# Upper bound on the encoded/source side length, regardless of scale - the
+# real portrait files added under assets/portraits/ run from ~1200px up to
+# ~2500px per side, so without a cap a team roster's worth of portraits
+# would embed several megabytes of base64 image data into the page for no
+# visible benefit at these display sizes.
+MAX_PORTRAIT_SOURCE_PX = 480
+
+
+@st.cache_data(show_spinner=False)
+def _load_portrait_data_uri(path_str: str, mtime: float, size_px: int) -> str | None:
+    """
+    Base64 PNG data URI for the portrait at path_str, resized to a
+    size_px x size_px square (center-cropped first if the source isn't
+    already square), or None if the file can't actually be decoded as an
+    image at all.
+
+    Why this exists, not just `st.image(path, width=...)`: auditing
+    assets/portraits/ turned up two real problems with the files placed
+    there, neither about the art itself. First, seven files (anna.png,
+    balthus.png, constance.png, cyril.png, hapi.png, jeritza.png,
+    yuri.png) turned out to be non-image content entirely - an HTML error
+    page or a JS file saved with a ".png" name, almost certainly a failed/
+    blocked download saved without checking what actually came back -
+    which would render as a broken-image icon (or worse, an exception) if
+    handed to an image widget as-is; these seven have since been removed
+    from assets/portraits/ (the character just shows the color-coded tile
+    now, same as any other character with no portrait file at all - see
+    render_portrait). Second, the remaining real portraits were valid,
+    high-resolution (1200px-2500px) WebP images that happened to be named
+    ".png" - not literally broken, but an extension that lies about the
+    actual format is exactly the kind of mismatch that makes "does this
+    decode/display correctly everywhere" a coin flip rather than a
+    guarantee, which is a plausible contributor to "portraits are blurry"
+    (a decoder that trusted the extension over the content could fail or
+    silently mis-render, and any browser-side fallback path is unlikely
+    to be a high-quality one); these have since been re-saved on disk as
+    genuine PNGs (downscaled to a 900px-per-side cap - still comfortably
+    above MAX_PORTRAIT_SOURCE_PX below - so the repo isn't carrying
+    multi-megabyte full-res source art no display size here actually uses).
+
+    This function's own decoding/resizing is still worth keeping even
+    with clean assets on disk now: it's what guards against the NEXT
+    mislabeled or corrupt file someone adds, not just the ones already
+    found and fixed. Explicitly decoding here via Pillow (which sniffs
+    actual file content, never trusting the extension), re-encoding to a
+    real, correctly-sized PNG, and embedding that as a data URI means a
+    file that can't actually be decoded as an image cleanly returns None
+    here instead of reaching the browser at all, so render_portrait falls
+    back to the color-coded tile for exactly that character instead of
+    showing a broken icon or raising; and every genuinely valid portrait
+    is guaranteed to reach the page as an actual, correctly-labeled,
+    appropriately-sized PNG, with the RESIZE done here (Pillow's own
+    high-quality LANCZOS filter, not whatever a generic image-serving
+    path might use) rather than left to chance.
+
+    @st.cache_data keyed on (path_str, mtime, size_px) - mtime (the
+    source file's own modification time) busts the cache automatically if
+    a portrait file is ever replaced, without needing any manual cache-
+    clearing.
+    """
+    if Image is None:
+        return None
+    try:
+        with Image.open(path_str) as im:
+            im.load()  # force full decode now, while we can still catch a decode error
+            im = im.convert("RGBA")
+            w, h = im.size
+            side = min(w, h)
+            left, top = (w - side) // 2, (h - side) // 2
+            im = im.crop((left, top, left + side, top + side))
+            encode_px = min(size_px, MAX_PORTRAIT_SOURCE_PX)
+            im = im.resize((encode_px, encode_px), Image.LANCZOS)
+            buf = io.BytesIO()
+            im.save(buf, format="PNG", optimize=True)
+    except Exception:
+        return None
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
 def render_portrait(character_name: str, house: str | None = None, width: int = 96, byleth_gender: str | None = None):
     """
     Render a character's portrait. If an image has been placed in
-    assets/portraits/ for them (see get_portrait_path/that folder's README),
-    it's used as-is - "bring your own art" stays supported for anyone who
-    wants to add their own. Otherwise (the default for virtually everyone,
-    since actual Three Houses character art isn't this project's to ship -
-    see get_portrait_path), the fallback tile is color-coded by house/route
-    (see HOUSE_COLORS) rather than a single flat neutral box, so portraits
-    are still visually distinct and meaningful - which house/route a
-    character belongs to - without redistributing anyone's IP. `house`
-    should be that character's data/character_base_stats.csv "house" value
-    (see get_house_lookup); omitted or unrecognized falls back to
-    DEFAULT_PORTRAIT_COLOR. `byleth_gender` only matters when character_name
-    is the Protagonist - see get_portrait_path.
+    assets/portraits/ for them (see get_portrait_path/that folder's README)
+    AND it can actually be decoded as an image (see
+    _load_portrait_data_uri), it's shown, resized and embedded at a
+    display-crisp resolution - "bring your own art" stays supported for
+    anyone who wants to add their own. Otherwise (no file at all, or one
+    that can't be decoded - see _load_portrait_data_uri's docstring for why
+    that second case can happen), the fallback tile is color-coded by
+    house/route (see HOUSE_COLORS) rather than a single flat neutral box,
+    so portraits are still visually distinct and meaningful - which house/
+    route a character belongs to - without redistributing anyone's IP or
+    ever showing a broken-image icon. `house` should be that character's
+    data/character_base_stats.csv "house" value (see get_house_lookup);
+    omitted or unrecognized falls back to DEFAULT_PORTRAIT_COLOR.
+    `byleth_gender` only matters when character_name is the Protagonist -
+    see get_portrait_path.
     """
     portrait = get_portrait_path(character_name, byleth_gender=byleth_gender)
+    data_uri = None
     if portrait:
-        st.image(str(portrait), width=width)
+        data_uri = _load_portrait_data_uri(
+            str(portrait), portrait.stat().st_mtime, width * PORTRAIT_RENDER_SCALE,
+        )
+    if data_uri:
+        st.markdown(
+            f"<img data-portrait-file='{portrait.name}' src='{data_uri}' width='{width}' height='{width}' "
+            f"style='border-radius:8px;object-fit:cover;display:block;' />",
+            unsafe_allow_html=True,
+        )
     else:
         color = HOUSE_COLORS.get(house, DEFAULT_PORTRAIT_COLOR)
         title = house or ""
@@ -297,6 +498,13 @@ def render_path_with_mixmatch(
     instead of Streamlit silently keeping the previous role's picks
     selected under an unchanged key (the reported "switching the target
     role doesn't change the selected classes" bug).
+
+    Every choice - the recommended pick or an override - also shows the
+    class's own flat stat boost narrowed to just the stat(s) role_weights
+    actually cares about (see optimizer.role_relevant_stat_deltas), e.g.
+    "Relevant to Magic Attacker: +3 Mag, +1 Dex" - so switching classes
+    shows what that switch actually buys FOR THE ROLE being built toward,
+    not just a fit-score number.
     """
     st.subheader("Recommended Class Path")
     st.caption(
@@ -322,21 +530,26 @@ def render_path_with_mixmatch(
                 key=f"mixmatch_{character}_{role_used}_{step['tier']}",
             )
             selected.append(choice)
+            choice_row = stat_boosts_df[stat_boosts_df["name"] == choice]
+            relevant_deltas = (
+                role_relevant_stat_deltas(choice_row.iloc[0], role_weights) if not choice_row.empty else []
+            )
             if choice == step["class"]:
                 if step.get("is_unique_class"):
-                    st.caption("⭐ Their own unique class")
+                    st.caption("Their own unique class")
                 st.caption(f"fit score {step['score']}")
+                if relevant_deltas:
+                    st.caption(f"Relevant to {role_used}: " + format_stat_deltas(relevant_deltas))
                 if step.get("requirement"):
                     st.caption(f"Requires: {step['requirement']}")
-                with st.expander("📈 Growth-rate modifiers"):
+                with st.expander("Growth-rate modifiers"):
                     render_growth_rate_mini_chart(
                         choice, class_growth_lookup, key=f"growth_mini_{character}_{role_used}_{step['tier']}",
                     )
                 if step.get("weapon_switch_warning"):
-                    st.warning("Requires a weapon type never trained so far - a slow switch in practice.", icon="⚠️")
+                    st.warning("Requires a weapon type never trained so far - a slow switch in practice.")
                 st.caption(step["why"])
             else:
-                choice_row = stat_boosts_df[stat_boosts_df["name"] == choice]
                 choice_score = (
                     round(float(score_class_for_role(choice_row.iloc[0], role_weights)), 2)
                     if not choice_row.empty else None
@@ -344,14 +557,24 @@ def render_path_with_mixmatch(
                 st.caption("Your pick - overrides the recommendation.")
                 if choice_score is not None:
                     st.caption(f"fit score {choice_score}")
+                if relevant_deltas:
+                    st.caption(f"Relevant to {role_used}: " + format_stat_deltas(relevant_deltas))
                 requirement = format_requirement(choice, weapon_req_lookup)
                 if requirement:
                     st.caption(f"Requires: {requirement}")
-                with st.expander("📈 Growth-rate modifiers"):
+                with st.expander("Growth-rate modifiers"):
                     render_growth_rate_mini_chart(
                         choice, class_growth_lookup, key=f"growth_mini_{character}_{role_used}_{step['tier']}",
                     )
     return selected
+
+
+def format_stat_deltas(deltas: list[tuple[str, float]]) -> str:
+    """"+3 Str, +1 Spd" from [("Str", 3), ("Spd", 1)] - see role_relevant_stat_deltas."""
+    return ", ".join(
+        f"{'+' if value >= 0 else ''}{int(value) if float(value).is_integer() else value} {stat}"
+        for stat, value in deltas
+    )
 
 
 def render_stat_charts(
@@ -433,7 +656,7 @@ def render_stat_charts(
 
 def render_team(
     team: list[dict], dlc_names: set[str], house_lookup: dict | None = None, dancer: str | None = None,
-    byleth_gender: str | None = None,
+    byleth_gender: str | None = None, weapon_req_lookup: dict | None = None,
 ):
     """
     dancer: the character name (if any) assigned this team's single Dancer
@@ -449,6 +672,16 @@ def render_team(
     byleth_gender: passed straight through to render_portrait for whichever
     member is the Protagonist (Byleth is force-deployed on every route, so
     in practice this fires on almost every team) - see get_portrait_path.
+
+    weapon_req_lookup (see optimizer.load_weapon_requirements_lookup), if
+    given, is used to show each member's COMBINED skill-rank requirement
+    across their whole path (optimizer.format_combined_requirements), not
+    just the final tier's own requirement - "final class requirement
+    display should show the skill rank needs for each class the character
+    is going to use in the path, e.g. Paladin then War Master needs B
+    Lances, B Riding, A Axes, A Brawling," not just War Master's own
+    requirement string with no mention of what Paladin itself demanded on
+    the way there.
     """
     st.subheader(f"Recommended Team ({len(team)})")
 
@@ -457,7 +690,7 @@ def render_team(
 
     for member in team:
         path_str = " → ".join(
-            f"{step['class']}⭐" if step.get("is_unique_class") else step["class"]
+            f"{step['class']} (unique class)" if step.get("is_unique_class") else step["class"]
             for step in member["path"]
         )
         with st.container(border=True):
@@ -471,16 +704,18 @@ def render_team(
                 st.markdown(f"**{display_name(member['character'], dlc_names)}**")
                 st.caption(f"{member['role']} (score {member['score']})")
                 if member["character"] == dancer:
-                    st.caption("💃 This team's Dancer (White Heron Cup) - swaps in instead of the path "
+                    st.caption("This team's Dancer (White Heron Cup) - swaps in instead of the path "
                                "at right when you need the Dance command; only one character on the "
                                "whole roster can hold it.")
             with col3:
                 st.write(path_str)
-                requirements = [step["requirement"] for step in member["path"] if step.get("requirement")]
-                if requirements:
-                    st.caption("Requires (final tier): " + requirements[-1])
+                combined_requirement = format_combined_requirements(
+                    [step["class"] for step in member["path"]], weapon_req_lookup,
+                ) if weapon_req_lookup else None
+                if combined_requirement:
+                    st.caption("Skill ranks needed across this path: " + combined_requirement)
                 if member.get("weapon_switch_warning"):
-                    st.caption(f"⚠️ {member['weapon_switch_warning']}")
+                    st.caption(f"Warning: {member['weapon_switch_warning']}")
                 st.caption(f"Why on the team: {member['why']}")
 
 
@@ -585,6 +820,87 @@ def render_class_explorer_tab(stat_boosts_df: pd.DataFrame, weapon_req_df: pd.Da
             )
 
 
+def render_role_fit_chart(role_scores: dict, used_role: str, key: str):
+    """
+    Bar chart of a character's fit-similarity score (optimizer.score_all_roles)
+    across EVERY role archetype, not just the single auto-detected winner -
+    "when you select a character, all you can see is what is considered
+    their best fit, but you can't see how well the program considers them
+    to fit other roles." The role actually being targeted (used_role -
+    either the auto-detected winner, or a manually-picked one) is colored
+    differently so it stays easy to pick out among all five bars.
+
+    These are the same standardized-growth-rate-cosine-similarity numbers
+    behind auto-detection (plus the small natural_role_affinity_bonus
+    nudge - see that function), not a fit score for any specific CLASS -
+    "how naturally does this character's own growth lean toward each
+    role," independent of which classes happen to be available at any
+    given tier.
+    """
+    roles = list(role_scores.keys())
+    values = [role_scores[r] for r in roles]
+    order = sorted(range(len(roles)), key=lambda i: values[i])
+    roles = [roles[i] for i in order]
+    values = [values[i] for i in order]
+    colors = ["#2e8b57" if r == used_role else "#6c7a89" for r in roles]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=values, y=roles, orientation="h", marker_color=colors,
+        text=[f"{v:+.2f}" for v in values], textposition="outside",
+    ))
+    max_abs = max((abs(v) for v in values), default=1) or 1
+    fig.update_layout(
+        height=220,
+        margin=dict(l=0, r=10, t=10, b=10),
+        xaxis=dict(title="Growth-rate fit (higher = more natural)", range=[-max_abs * 1.3, max_abs * 1.6]),
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True, key=key)
+
+
+def render_growth_stack_chart(character: str, growth_row: pd.Series, selected_steps: list[dict], class_growth_lookup: dict):
+    """
+    Stacked bar chart of a character's own growth rate plus ONE tier's
+    class growth-rate modifier (per stat), with a control to pick which
+    tier in the actually-selected path to overlay - "an option to see
+    character growths as well, perhaps a bar chart with character growths
+    with class growths stacked on top, and click which of the classes in
+    the path you want displayed." Defaults to the deepest/final tier,
+    since that's the class actually driving the projected-stats chart
+    above, but every tier in the path is selectable.
+    """
+    if not selected_steps:
+        return
+    st.subheader("Growth Breakdown")
+    tier_labels = [f"{step['tier']} ({step['class']})" for step in selected_steps]
+    chosen_label = st.radio(
+        "Show growth breakdown for:", options=tier_labels, index=len(tier_labels) - 1,
+        key=f"growth_stack_tier_{character}", horizontal=True,
+    )
+    chosen_step = selected_steps[tier_labels.index(chosen_label)]
+    class_mods = class_growth_lookup.get(chosen_step["class"], {})
+
+    character_values = [float(growth_row[s]) for s in STAT_COLS]
+    class_values = [class_mods.get(s, 0) for s in STAT_COLS]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=STAT_COLS, y=character_values, name=f"{character}'s own growth"))
+    fig.add_trace(go.Bar(x=STAT_COLS, y=class_values, name=f"{chosen_step['class']} modifier"))
+    fig.update_layout(
+        barmode="relative",
+        height=380,
+        margin=dict(l=0, r=0, t=40, b=0),
+        yaxis_title="Growth rate (% per level-up)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    st.plotly_chart(fig, use_container_width=True, key=f"growth_stack_{character}_{chosen_step['tier']}")
+    st.caption(
+        "Character growth (bottom) plus this class's own growth-rate modifier (stacked on top, "
+        "which can be negative for some stats/classes) - the combined rate actually used for "
+        "that stat on every level-up spent in this class."
+    )
+
+
 def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
                           weapon_req_df, character_weapon_talent_df, starting_level_df, class_growth_df,
                           class_base_stats_df, character_relics_df, playable_names, dlc_names,
@@ -592,23 +908,36 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
     st.caption(
         "Pick a character and see a recommended class path - either toward their "
         "natural strengths, or a role you choose. Only classes that character can "
-        "actually access (character/gender-locked classes included) are considered."
+        "actually access (character/gender-locked classes included) are considered. "
+        "New here? Try Bernadetta as a Sniper, or leave the role on auto-detect and "
+        "see what the tool thinks any character is naturally built for - the "
+        "\"fit score\" on each step is just how well that class's own stat boosts "
+        "line up with the role you're targeting; higher is a better match."
     )
+
+    default_character = query_param_str("character")
+    default_role = query_param_str("role")
+    default_level = query_param_int("level", DEFAULT_TARGET_LEVEL)
+    role_options = ["Auto-detect from growth rates"] + list(ROLE_PROFILES.keys())
 
     col1, col2, col3 = st.columns([2, 2, 1])
     with col1:
         character = st.selectbox(
             "Character", options=playable_names, key="char_select",
+            index=playable_names.index(default_character) if default_character in playable_names else 0,
             format_func=lambda name: display_name(name, dlc_names),
         )
     with col2:
         role_choice = st.selectbox(
-            "Target role",
-            options=["Auto-detect from growth rates"] + list(ROLE_PROFILES.keys()),
-            key="char_role_select",
+            "Target role", options=role_options, key="char_role_select",
+            index=role_options.index(default_role) if default_role in role_options else 0,
         )
     with col3:
-        target_level = st.slider("Target level", min_value=5, max_value=40, value=DEFAULT_TARGET_LEVEL, key="char_level")
+        target_level = st.slider(
+            "Target level", min_value=5, max_value=40,
+            value=default_level if 5 <= default_level <= 40 else DEFAULT_TARGET_LEVEL,
+            key="char_level",
+        )
 
     include_dlc_classes = st.checkbox(
         "Include DLC classes (Cindered Shadows certification classes)", value=False,
@@ -618,6 +947,9 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
     )
 
     role_name = None if role_choice == "Auto-detect from growth rates" else role_choice
+    sync_share_query_params(character, role_choice, target_level)
+
+    character_gender = resolve_character_gender(character, character_gender_df, byleth_gender)
 
     result = recommend_for_character(
         character, base_stats_df, growth_rates_df, stat_boosts_df,
@@ -627,9 +959,12 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
         starting_level_df=starting_level_df, include_dlc_classes=include_dlc_classes,
         class_growth_df=class_growth_df, class_base_stats_df=class_base_stats_df,
         character_relics_df=character_relics_df,
+        character_gender_override=character_gender if character == "Protagonist" else None,
     )
     class_growth_lookup = load_class_growth_lookup(class_growth_df)
     class_base_stats_lookup = load_class_base_stats_lookup(class_base_stats_df)
+    character_proficiency = load_character_proficiency_lookup(character_weapon_talent_df).get(character)
+    character_relic_weapon_types = load_character_relic_lookup(character_relics_df).get(character)
 
     col_portrait, col_info = st.columns([1, 5])
     with col_portrait:
@@ -649,7 +984,7 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
             )
         if result["join_level"] > 1:
             st.caption(
-                f"🕐 Joins the roster at level {result['join_level']} - base stats and the "
+                f"Joins the roster at level {result['join_level']} - base stats and the "
                 f"projection below start from there, not level 1."
             )
         if result["expected_stats_at_level"] != result["requested_target_level"]:
@@ -657,19 +992,26 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
                 f"Target level {result['requested_target_level']} is below their join level - "
                 f"projecting to level {result['expected_stats_at_level']} instead."
             )
-        if result.get("weapon_switch_warning"):
-            st.warning(result["weapon_switch_warning"], icon="⚠️")
+
+    with st.expander("How well does this character fit every role? (not just the best one)"):
+        roster_means, roster_stds = compute_roster_stat_stats(growth_rates_df)
+        growth_row = growth_rates_df[growth_rates_df["name"] == character].iloc[0]
+        role_scores = score_all_roles(
+            growth_row, roster_means, roster_stds,
+            character_proficiency=character_proficiency,
+            character_relic_weapon_types=character_relic_weapon_types,
+        )
+        render_role_fit_chart(role_scores, result["role_used"], key=f"role_fit_{character}")
+        st.caption(
+            "Every role's growth-rate fit for this character, not just the auto-detected best one - "
+            "the highlighted bar is whichever role is currently being targeted above."
+        )
 
     if not result["path"]:
         st.warning("No class path could be built - check that class_stat_boosts.csv has data for all tiers.")
         return
 
     eligibility_lookup = load_eligibility_lookup(eligibility_df)
-    character_gender = None
-    gender_row = character_gender_df[character_gender_df["name"] == character]
-    if not gender_row.empty:
-        character_gender = gender_row.iloc[0]["gender"]
-
     weapon_req_lookup = load_weapon_requirements_lookup(weapon_req_df)
     role_weights = ROLE_PROFILES[result["role_used"]]
 
@@ -680,19 +1022,35 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
     )
     final_class = selected_path[-1]
 
-    st.divider()
-    effective_level = result["expected_stats_at_level"]
-    # Always recomputed from the FULL actually-selected path (every tier,
-    # not just the final one) - see stats_for_selected_path. A class
-    # base-stat floor (see load_class_base_stats_lookup) can apply at any
-    # tier, not just the last, so an earlier-tier mix-and-match override
-    # can change the final numbers now, not just the path's flavor text -
-    # this is what makes the projected-stats chart re-render on ANY tier
-    # change, not only when the final tier itself was touched.
+    # Recomputed from the FULL actually-selected path (every tier, not just
+    # the final one) - see stats_for_selected_path. A class base-stat floor
+    # (see load_class_base_stats_lookup) can apply at any tier, not just
+    # the last, so an earlier-tier mix-and-match override can change the
+    # final numbers now, not just the path's flavor text.
     selected_steps = [
         {"tier": step["tier"], "class": choice}
         for step, choice in zip(result["path"], selected_path)
     ]
+
+    # Recomputed from selected_steps, NOT reused from
+    # result["weapon_switch_warning"] (which only ever reflects the tool's
+    # ORIGINAL recommendation) - this is the fix for "if a warning is
+    # displayed and I change the class so there is no longer a class
+    # warning, the overall warning is still displayed."
+    combined_switch_warning = path_weapon_switch_warning(
+        character, selected_steps, weapon_req_lookup, character_proficiency,
+    )
+    if combined_switch_warning:
+        st.warning(combined_switch_warning)
+
+    combined_requirement = format_combined_requirements(
+        [step["class"] for step in selected_steps], weapon_req_lookup,
+    )
+    if combined_requirement:
+        st.caption(f"Skill ranks needed across this whole path: {combined_requirement}")
+
+    st.divider()
+    effective_level = result["expected_stats_at_level"]
     final_stats = stats_for_selected_path(
         character, selected_steps, base_stats_df, growth_rates_df, stat_boosts_df,
         effective_level, start_level=result["join_level"],
@@ -704,7 +1062,7 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
         base_level_label=base_level_label,
     )
 
-    character_proficiency = load_character_proficiency_lookup(character_weapon_talent_df).get(character)
+    render_growth_stack_chart(character, growth_row, selected_steps, class_growth_lookup)
 
     st.button(
         "📥 Import this build into Team Builder", key=f"import_{character}",
@@ -717,7 +1075,7 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
         ),
     )
     if character in st.session_state.get("imported_builds", {}):
-        st.caption(f"✅ Imported - {character} will use this exact build in the Team Builder tab.")
+        st.caption(f"Imported - {character} will use this exact build in the Team Builder tab.")
 
 
 def _import_build(
@@ -869,7 +1227,7 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
     mandatory = [n for n in mandatory_names_for_route(route_choice) if n in candidates] if force_deployments else []
     if mandatory:
         st.caption(
-            "🔒 Force-deployed, always included: "
+            "Force-deployed, always included: "
             + ", ".join(display_name(n, dlc_names) for n in mandatory)
         )
 
@@ -909,7 +1267,7 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
     col_build, col_shuffle = st.columns([1, 1])
     build_clicked = col_build.button("Build Team", type="primary")
     shuffle_clicked = col_shuffle.button(
-        "🎲 Different team, same pool",
+        "Different team, same pool",
         help="Same candidate pool and settings, but weighted-random picks instead of always the single "
              "top scorer per role - use this if you don't want the exact same team every time.",
     )
@@ -934,6 +1292,7 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
             class_base_stats_df=class_base_stats_df,
             character_relics_df=character_relics_df,
             force_deployed=set(mandatory),
+            byleth_gender=byleth_gender,
         )
         # Persisted in session_state rather than only a local variable: Streamlit reruns this whole
         # function on ANY widget interaction, not just the two build buttons above (e.g. touching the
@@ -965,7 +1324,7 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
             # CHARACTERS docstring for why Dancer is single-select at all.
             dancer_widget_key = "team_dancer_select_" + ",".join(sorted(m["character"] for m in team))
             dancer_choice = st.selectbox(
-                "💃 Assign this team's Dancer (optional)",
+                "Assign this team's Dancer (optional)",
                 options=dancer_options, key=dancer_widget_key,
                 format_func=lambda n: display_name(n, dlc_names) if n != "None" else "None",
                 help="Only one character can hold the Dancer class per playthrough - it's unlocked via "
@@ -978,8 +1337,125 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
 
             render_team(
                 team, dlc_names, house_lookup=get_house_lookup(base_stats_df), dancer=dancer,
-                byleth_gender=byleth_gender,
+                byleth_gender=byleth_gender, weapon_req_lookup=load_weapon_requirements_lookup(weapon_req_df),
             )
+
+
+def _render_build_comparer_side(
+    prefix: str, base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
+    weapon_req_df, character_weapon_talent_df, starting_level_df, class_growth_df, class_base_stats_df,
+    character_relics_df, playable_names, dlc_names, byleth_gender, default_character: str, role_options: list[str],
+):
+    """One side (A or B) of the Build Comparer tab - its own character/role/level picker plus a full recommend_for_character call, independent of the other side."""
+    character = st.selectbox(
+        "Character", options=playable_names, key=f"{prefix}_character",
+        index=playable_names.index(default_character) if default_character in playable_names else 0,
+        format_func=lambda name: display_name(name, dlc_names),
+    )
+    role_choice = st.selectbox("Target role", options=role_options, key=f"{prefix}_role")
+    target_level = st.slider("Target level", min_value=5, max_value=40, value=DEFAULT_TARGET_LEVEL, key=f"{prefix}_level")
+    role_name = None if role_choice == "Auto-detect from growth rates" else role_choice
+    character_gender = resolve_character_gender(character, character_gender_df, byleth_gender)
+
+    result = recommend_for_character(
+        character, base_stats_df, growth_rates_df, stat_boosts_df,
+        role_name=role_name, target_level=target_level,
+        eligibility_df=eligibility_df, character_gender_df=character_gender_df,
+        weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
+        starting_level_df=starting_level_df,
+        class_growth_df=class_growth_df, class_base_stats_df=class_base_stats_df,
+        character_relics_df=character_relics_df,
+        character_gender_override=character_gender if character == "Protagonist" else None,
+    )
+    return character, result
+
+
+def render_build_comparer_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
+                               weapon_req_df, character_weapon_talent_df, starting_level_df, class_growth_df,
+                               class_base_stats_df, character_relics_df, playable_names, dlc_names,
+                               byleth_gender=None):
+    """
+    Compare two full class-PATH recommendations side by side - "I like our
+    class comparer, but a way to directly compare two class paths would be
+    really cool," and roadmap item P9 ("side-by-side build comparison, a
+    natural extension of the Class Explorer's existing two-class
+    comparison, applied to full builds or two team compositions"). Each
+    side is its own independent character/role/level pick (so this covers
+    "two different characters," "the same character under two roles," and
+    "the same character at two target levels" all with the same UI), with
+    the two final-stat projections overlaid on one bar chart for a direct
+    read of the gap, not just two separate numbers to compare by eye.
+
+    This compares RECOMMENDED paths (no mix-and-match here - that's what
+    the Character Optimizer tab is for); it's meant for "which of these two
+    approaches ends up stronger," not for fine-tuning one specific build.
+    """
+    st.caption(
+        "Compare two full class paths side by side - two different characters, the same "
+        "character built toward two different roles, or the same character at two target "
+        "levels. Each side is an independent recommendation (use the Character Optimizer "
+        "tab for mix-and-match fine-tuning of one specific build)."
+    )
+    role_options = ["Auto-detect from growth rates"] + list(ROLE_PROFILES.keys())
+    default_a = playable_names[0] if playable_names else ""
+    default_b = playable_names[1] if len(playable_names) > 1 else default_a
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown("**Build A**")
+        char_a, result_a = _render_build_comparer_side(
+            "compare_a", base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
+            weapon_req_df, character_weapon_talent_df, starting_level_df, class_growth_df, class_base_stats_df,
+            character_relics_df, playable_names, dlc_names, byleth_gender, default_a, role_options,
+        )
+    with col_b:
+        st.markdown("**Build B**")
+        char_b, result_b = _render_build_comparer_side(
+            "compare_b", base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
+            weapon_req_df, character_weapon_talent_df, starting_level_df, class_growth_df, class_base_stats_df,
+            character_relics_df, playable_names, dlc_names, byleth_gender, default_b, role_options,
+        )
+
+    weapon_req_lookup = load_weapon_requirements_lookup(weapon_req_df)
+
+    def render_path_summary(container, character, result):
+        with container:
+            if not result["path"]:
+                st.warning("No class path could be built at this level.")
+                return
+            st.write(f"**{character} -> {result['role_used']}**")
+            for step in result["path"]:
+                tag = " (unique class)" if step.get("is_unique_class") else ""
+                st.caption(f"{step['tier']}: {step['class']}{tag} (fit score {step['score']})")
+            combined_requirement = format_combined_requirements(
+                [step["class"] for step in result["path"]], weapon_req_lookup,
+            )
+            if combined_requirement:
+                st.caption(f"Skill ranks needed across this path: {combined_requirement}")
+
+    col_a2, col_b2 = st.columns(2)
+    render_path_summary(col_a2, char_a, result_a)
+    render_path_summary(col_b2, char_b, result_b)
+
+    if result_a["path"] and result_b["path"]:
+        st.divider()
+        st.subheader("Final Stat Comparison")
+        final_a, final_b = result_a["expected_final_stats"], result_b["expected_final_stats"]
+        label_a = f"{char_a} ({result_a['path'][-1]['class']}, Lv{result_a['expected_stats_at_level']})"
+        label_b = f"{char_b} ({result_b['path'][-1]['class']}, Lv{result_b['expected_stats_at_level']})"
+        fig = go.Figure()
+        fig.add_trace(go.Bar(x=STAT_COLS, y=[final_a[s] for s in STAT_COLS], name=label_a))
+        fig.add_trace(go.Bar(x=STAT_COLS, y=[final_b[s] for s in STAT_COLS], name=label_b))
+        max_value = max(list(final_a.values()) + list(final_b.values()) + [1])
+        fig.update_layout(
+            barmode="group",
+            height=460,
+            margin=dict(l=0, r=0, t=60, b=0),
+            yaxis_title="Projected stat value",
+            yaxis=dict(range=[0, max_value * 1.25]),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f"build_comparer_{char_a}_{char_b}")
 
 
 def main():
@@ -993,7 +1469,7 @@ def main():
 
     title_col, byleth_gender_col = st.columns([5, 1])
     with title_col:
-        st.title("⚔️ Three Houses Class Optimizer")
+        st.title("Three Houses Class Optimizer")
     with byleth_gender_col:
         # Byleth's portrait is the one piece of art in this whole app that
         # depends on a choice the game itself hands the player, rather than
@@ -1003,16 +1479,19 @@ def main():
         # choice should carry across both tabs instead of being asked twice
         # or reset on every tab switch.
         byleth_gender = st.selectbox(
-            "Byleth's portrait", options=list(BYLETH_PORTRAIT_SLUGS.keys()),
+            "Byleth's gender", options=list(BYLETH_PORTRAIT_SLUGS.keys()),
             index=list(BYLETH_PORTRAIT_SLUGS.keys()).index(DEFAULT_BYLETH_GENDER),
             key="byleth_portrait_gender",
-            help="Only affects which portrait is shown if you've added your own "
-                 "byleth_m/byleth_f art (see assets/portraits/README.md) - Byleth's "
-                 "gender is a player choice in-game and never affects stats or class "
-                 "eligibility either way.",
+            help="The gender you'd pick for Byleth at the start of the game - affects which "
+                 "portrait is shown (if you've added your own byleth_m/byleth_f art, see "
+                 "assets/portraits/README.md) AND which gender-locked classes Byleth is "
+                 "actually eligible for (e.g. War Master is male-only, Falcon Knight is "
+                 "female-only) - exactly like every other character's fixed gender does.",
         )
 
-    tab1, tab2, tab3 = st.tabs(["Character Optimizer", "Team Builder", "Class Explorer"])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Character Optimizer", "Team Builder", "Class Explorer", "Build Comparer"]
+    )
     with tab1:
         render_character_tab(
             base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
@@ -1029,6 +1508,13 @@ def main():
         )
     with tab3:
         render_class_explorer_tab(stat_boosts_df, weapon_req_df, class_growth_df)
+    with tab4:
+        render_build_comparer_tab(
+            base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
+            weapon_req_df, character_weapon_talent_df, starting_level_df, class_growth_df,
+            class_base_stats_df, character_relics_df, playable_names, dlc_names,
+            byleth_gender=byleth_gender,
+        )
 
 
 if __name__ == "__main__":

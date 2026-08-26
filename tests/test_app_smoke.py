@@ -56,6 +56,8 @@ class TestAppSmoke(unittest.TestCase):
             st.CAPTION_CALLS.clear()
         if hasattr(st, "IMAGE_CALLS"):
             st.IMAGE_CALLS.clear()
+        if hasattr(st, "WARNING_CALLS"):
+            st.WARNING_CALLS.clear()
         (
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
@@ -89,10 +91,21 @@ class TestAppSmoke(unittest.TestCase):
         # Item 8 (route-based color coding): the fallback portrait tile
         # should be tinted per the character's own house/route (see
         # app.HOUSE_COLORS), not a single flat neutral box for everyone.
+        # PORTRAIT_DIR is swapped to an empty scratch directory for this
+        # test (rather than relying on the real assets/portraits/ having
+        # no file for whichever character is picked) so this test keeps
+        # meaning "no portrait art on file" regardless of which real
+        # portrait files anyone has since added to the repo.
         if not hasattr(st, "MARKDOWN_CALLS"):
             self.skipTest("stub-only assertion - MARKDOWN_CALLS isn't part of the real streamlit API")
-        st.WIDGET_OVERRIDES = {"char_select": "Bernadetta"}  # Black Eagles
-        self._render_character_tab()
+        real_portrait_dir = app.PORTRAIT_DIR
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            app.PORTRAIT_DIR = Path(tmp_dir)
+            try:
+                st.WIDGET_OVERRIDES = {"char_select": "Bernadetta"}  # Black Eagles
+                self._render_character_tab()
+            finally:
+                app.PORTRAIT_DIR = real_portrait_dir
         portrait_html = next(html for html in st.MARKDOWN_CALLS if "div title=" in html)
         self.assertIn(app.HOUSE_COLORS["Black Eagles"], portrait_html)
         self.assertIn("Black Eagles", portrait_html)
@@ -100,8 +113,14 @@ class TestAppSmoke(unittest.TestCase):
     def test_team_tab_portraits_are_color_coded_by_house(self):
         if not hasattr(st, "MARKDOWN_CALLS"):
             self.skipTest("stub-only assertion - MARKDOWN_CALLS isn't part of the real streamlit API")
-        st.WIDGET_OVERRIDES = {"team_route": "Blue Lions", "Build Team": True}
-        self._render_team_tab()
+        real_portrait_dir = app.PORTRAIT_DIR
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            app.PORTRAIT_DIR = Path(tmp_dir)
+            try:
+                st.WIDGET_OVERRIDES = {"team_route": "Blue Lions", "Build Team": True}
+                self._render_team_tab()
+            finally:
+                app.PORTRAIT_DIR = real_portrait_dir
         portrait_htmls = [html for html in st.MARKDOWN_CALLS if "div title=" in html]
         self.assertTrue(portrait_htmls)
         # Every team member on a Blue Lions build is either a Blue Lions
@@ -216,6 +235,40 @@ class TestAppSmoke(unittest.TestCase):
         self.assertEqual(beginner_step["requirement"], "Axe D or Bow D or Brawling D")
         self.assertFalse(beginner_step["is_unique_class"])
 
+    def test_character_tab_weapon_switch_warning_clears_after_mixmatch_override(self):
+        # Regression test for "the overall warning stays displayed even after
+        # changing the class removes the underlying issue" - see
+        # path_weapon_switch_warning and its call site in render_character_tab.
+        # At level 5, Catherine's recommended Physical Attacker path is a
+        # single Beginner step - Fighter (Axe/Bow/Brawling), a real switch
+        # away from her own Sword-only proficiency. Overriding that one tier
+        # to Myrmidon (her trained weapon type) must clear the warning
+        # entirely - the banner has to follow the actual selected path, not
+        # the tool's original recommendation.
+        if not hasattr(st, "WARNING_CALLS"):
+            self.skipTest("stub-only assertion - WARNING_CALLS isn't part of the real streamlit API")
+
+        st.WIDGET_OVERRIDES = {
+            "char_select": "Catherine", "char_role_select": "Physical Attacker", "char_level": 5,
+        }
+        self._render_character_tab()
+        self.assertTrue(
+            any("Fighter" in w and "never trained" in w for w in st.WARNING_CALLS),
+            f"expected a Fighter weapon-switch warning, got {st.WARNING_CALLS}",
+        )
+
+        st.session_state.clear()
+        st.WARNING_CALLS.clear()
+        st.WIDGET_OVERRIDES = {
+            "char_select": "Catherine", "char_role_select": "Physical Attacker", "char_level": 5,
+            "mixmatch_Catherine_Physical Attacker_Beginner": "Myrmidon",
+        }
+        self._render_character_tab()
+        self.assertFalse(
+            any("never trained" in w for w in st.WARNING_CALLS),
+            f"stale weapon-switch warning survived the override: {st.WARNING_CALLS}",
+        )
+
     def test_team_tab_build_then_survives_unrelated_rerun(self):
         st.WIDGET_OVERRIDES = {
             "team_route": "Black Eagles (Silver Snow)", "team_size": 6, "team_level": 30,
@@ -233,7 +286,7 @@ class TestAppSmoke(unittest.TestCase):
         # the previously built team.
         st.WIDGET_OVERRIDES = {
             "team_route": "Black Eagles (Silver Snow)", "team_size": 6, "team_level": 30,
-            "Build Team": False, "\U0001F3B2 Different team, same pool": False,
+            "Build Team": False, "Different team, same pool": False,
         }
         self._render_team_tab()
         self.assertEqual(st.session_state["team_result"], first_team)
@@ -289,7 +342,7 @@ class TestAppSmoke(unittest.TestCase):
         # assigning its Dancer, the way a real user would.
         st.WIDGET_OVERRIDES = {
             "team_route": "Blue Lions", "team_size": 6, "team_level": 30,
-            "Build Team": False, "\U0001F3B2 Different team, same pool": False,
+            "Build Team": False, "Different team, same pool": False,
             dancer_widget_key: non_protagonist,
         }
         if hasattr(st, "CAPTION_CALLS"):
@@ -306,7 +359,7 @@ class TestAppSmoke(unittest.TestCase):
     def test_team_tab_shuffle_button(self):
         st.WIDGET_OVERRIDES = {
             "team_route": "Full roster", "team_size": 10, "team_level": 30,
-            "\U0001F3B2 Different team, same pool": True,
+            "Different team, same pool": True,
         }
         self._render_team_tab()
         self.assertEqual(len(st.session_state["team_result"]), 10)
@@ -451,8 +504,17 @@ class TestBylethPortraitGenderThroughRenderFunctions(unittest.TestCase):
     End-to-end coverage through the real render functions (not just
     get_portrait_path directly) - confirms byleth_gender actually threads
     through render_character_tab / render_team_tab / render_team /
-    render_portrait to st.image(), using the IMAGE_CALLS capture added to
-    tests/stubs/streamlit.py alongside this feature.
+    render_portrait, using the MARKDOWN_CALLS capture and the
+    data-portrait-file attribute render_portrait embeds alongside a
+    decoded portrait's data URI (see _load_portrait_data_uri) - the
+    successor to an earlier version of this test class that checked
+    IMAGE_CALLS, from back when render_portrait called st.image() directly
+    with the raw file path; portraits are now decoded, resized, and
+    embedded as a data URI instead (see render_portrait's docstring for
+    why), so byleth_m.png/byleth_f.png must be real, decodable images here
+    (a 1x1 PNG - Pillow is required for this class's assertions to mean
+    anything, same as it now is for the app itself), not empty placeholder
+    files.
 
     Deliberately a plain TestCase with its own minimal setUp (mirroring
     TestAppSmoke.setUp's data loading) rather than subclassing TestAppSmoke
@@ -464,8 +526,8 @@ class TestBylethPortraitGenderThroughRenderFunctions(unittest.TestCase):
     def setUp(self):
         st.session_state.clear()
         st.WIDGET_OVERRIDES = {}
-        if hasattr(st, "IMAGE_CALLS"):
-            st.IMAGE_CALLS.clear()
+        if hasattr(st, "MARKDOWN_CALLS"):
+            st.MARKDOWN_CALLS.clear()
         (
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
@@ -478,16 +540,29 @@ class TestBylethPortraitGenderThroughRenderFunctions(unittest.TestCase):
         self._real_portrait_dir = app.PORTRAIT_DIR
         self._tmp_dir = tempfile.TemporaryDirectory()
         app.PORTRAIT_DIR = Path(self._tmp_dir.name)
-        (app.PORTRAIT_DIR / "byleth_m.png").write_bytes(b"")
-        (app.PORTRAIT_DIR / "byleth_f.png").write_bytes(b"")
+        self._write_minimal_png(app.PORTRAIT_DIR / "byleth_m.png")
+        self._write_minimal_png(app.PORTRAIT_DIR / "byleth_f.png")
 
     def tearDown(self):
         app.PORTRAIT_DIR = self._real_portrait_dir
         self._tmp_dir.cleanup()
 
+    @staticmethod
+    def _write_minimal_png(path):
+        try:
+            from PIL import Image
+        except ImportError:
+            path.write_bytes(b"")  # Pillow unavailable - render_portrait will fall back to the color tile
+            return
+        Image.new("RGB", (4, 4), color=(200, 30, 30)).save(path, format="PNG")
+
     def test_character_tab_shows_the_selected_gender_portrait(self):
-        if not hasattr(st, "IMAGE_CALLS"):
-            self.skipTest("stub-only assertion - IMAGE_CALLS isn't part of the real streamlit API")
+        if not hasattr(st, "MARKDOWN_CALLS"):
+            self.skipTest("stub-only assertion - MARKDOWN_CALLS isn't part of the real streamlit API")
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            self.skipTest("Pillow isn't installed - portrait decoding always falls back to the color tile")
         st.WIDGET_OVERRIDES = {"char_select": "Protagonist"}
         app.render_character_tab(
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
@@ -496,12 +571,16 @@ class TestBylethPortraitGenderThroughRenderFunctions(unittest.TestCase):
             self.character_relics_df, self.playable_names, self.dlc_names,
             byleth_gender="Female",
         )
-        self.assertTrue(any("byleth_f.png" in path for path in st.IMAGE_CALLS))
-        self.assertFalse(any("byleth_m.png" in path for path in st.IMAGE_CALLS))
+        self.assertTrue(any("byleth_f.png" in html for html in st.MARKDOWN_CALLS if "data-portrait-file" in html))
+        self.assertFalse(any("byleth_m.png" in html for html in st.MARKDOWN_CALLS if "data-portrait-file" in html))
 
     def test_team_tab_shows_the_selected_gender_portrait_for_byleth(self):
-        if not hasattr(st, "IMAGE_CALLS"):
-            self.skipTest("stub-only assertion - IMAGE_CALLS isn't part of the real streamlit API")
+        if not hasattr(st, "MARKDOWN_CALLS"):
+            self.skipTest("stub-only assertion - MARKDOWN_CALLS isn't part of the real streamlit API")
+        try:
+            import PIL  # noqa: F401
+        except ImportError:
+            self.skipTest("Pillow isn't installed - portrait decoding always falls back to the color tile")
         st.WIDGET_OVERRIDES = {
             "team_route": "Golden Deer", "team_size": 4, "team_level": 30, "Build Team": True,
         }
@@ -514,7 +593,7 @@ class TestBylethPortraitGenderThroughRenderFunctions(unittest.TestCase):
         )
         # Byleth is force-deployed on every route (mandatory_names_for_route), so a
         # Golden Deer team of 4 always includes the Protagonist and their portrait.
-        self.assertTrue(any("byleth_f.png" in path for path in st.IMAGE_CALLS))
+        self.assertTrue(any("byleth_f.png" in html for html in st.MARKDOWN_CALLS if "data-portrait-file" in html))
 
 
 if __name__ == "__main__":

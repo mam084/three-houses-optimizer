@@ -201,6 +201,67 @@ WEAPON_SWITCH_PENALTY = 0.6
 MOUNT_ARMOR_SKILLS = {"Riding", "Flying", "Heavy Armour"}
 HIGH_CERTIFICATION_RANKS = {"A"}
 
+# Certification-exam skill ranks, worst to best, as they actually appear in
+# data/class_weapon_requirements.csv (D, C, C+, B, B+, A) - E/E+/D+/A+/S are
+# included too since character_weapon_talent.csv's "top_rank" column and the
+# game's own rank scale use them, even though no CLASS requirement currently
+# asks for one. Used to compare two ranks for the same skill (see
+# combined_requirements_for_classes) - a plain string compare would put
+# "B+" before "B" alphabetically-wrong-ways and wouldn't order "C+" between
+# "C" and "B" at all.
+RANK_ORDER = ["E", "E+", "D", "D+", "C", "C+", "B", "B+", "A", "A+", "S"]
+RANK_INDEX = {rank: i for i, rank in enumerate(RANK_ORDER)}
+
+# A role's real-game "does this class let the character actually contribute
+# to this role" check, used to gate which unique/story class gets
+# UNIQUE_CLASS_SCORE_BONUS (see recommend_path) - the same
+# physical/magic/hybrid vocabulary class_weapon_requirements.csv's own
+# weapon_category column uses. Tank and Speed/Precision aren't listed
+# because, unlike Physical/Magic Attacker and Support, this dataset's Tank
+# and Speed/Precision candidate pools were never observed to include a
+# unique class whose weapon category actually conflicts with the role (a
+# tank or a speedster doesn't need a specific weapon type the way an
+# Attacker or a healer does) - a role absent from this dict is simply never
+# gated, same as ROLE_REQUIRED_WEAPON_CATEGORY's own "role doesn't care"
+# no-op case.
+ROLE_REQUIRED_WEAPON_CATEGORY = {
+    "Physical Attacker": {"physical", "hybrid"},
+    "Magic Attacker": {"magic", "hybrid"},
+    "Support": {"magic", "hybrid"},
+}
+
+# Small, bounded nudge (on a cosine-similarity scale of -1..1) toward a role
+# that matches a character's own starting weapon proficiency or Hero's
+# Relic weapon type - see natural_role_affinity_bonus. Deliberately much
+# smaller than a real growth-rate-driven similarity gap (usually several
+# tenths) so it only breaks a genuinely close natural-role call, or nudges
+# an otherwise-ambiguous character toward the role their own equipment
+# already points at, without overriding a role a character's growth rates
+# clearly favor. This was previously nonexistent - natural-role
+# auto-detection looked at growth rates ALONE, with proficiency/relics only
+# ever factoring into which CLASS gets picked within an already-decided
+# role (see weapon_growth_bonus/relic_affinity_bonus) - "how much are a
+# character's natural proficiencies being taken into account for their
+# default role" and "Lorenz's relic only supports mages, but he's still
+# suggested as a Tank" are both this same gap: a character's own gear
+# affinity had no voice at all in which role got auto-detected.
+NATURAL_ROLE_AFFINITY_WEIGHT = 0.05
+
+# Which of the two broad weapon families (data/character_weapon_talent.csv,
+# data/character_relics.csv) each auto-detectable role is "about," for
+# natural_role_affinity_bonus. Reason/Faith are the only magic weapon types
+# in this dataset; every other skill type (Sword/Axe/Lance/Bow/Brawling/
+# Riding/Flying/Heavy Armour/Authority) is physical. Tank and Speed/
+# Precision are deliberately left unmapped (None) here too - same reasoning
+# as ROLE_REQUIRED_WEAPON_CATEGORY above; a role with no entry gets no
+# affinity nudge either direction, rather than an invented one.
+MAGIC_WEAPON_TYPES = {"Reason", "Faith"}
+ROLE_NATURAL_WEAPON_CATEGORY = {
+    "Physical Attacker": "physical",
+    "Magic Attacker": "magic",
+    "Support": "magic",
+}
+
 
 def reachable_tiers(target_level: int, tiers: list[str] = TIER_ORDER) -> list[str]:
     """
@@ -345,14 +406,76 @@ def compute_roster_stat_stats(growth_rates_df: pd.DataFrame) -> tuple[pd.Series,
     return means, stds
 
 
+def natural_role_affinity_bonus(role_name: str, weapon_types: set | None) -> float:
+    """
+    NATURAL_ROLE_AFFINITY_WEIGHT if role_name's own weapon family
+    (ROLE_NATURAL_WEAPON_CATEGORY) overlaps weapon_types (a character's
+    starting weapon proficiency and/or Hero's Relic weapon type(s), unioned
+    by the caller), else 0.0. A role absent from ROLE_NATURAL_WEAPON_CATEGORY
+    (Tank, Speed/Precision) or an empty/missing weapon_types always returns
+    0.0 - see both constants' docstrings for why this is deliberately
+    narrow rather than a blanket "equipment always matters" rule.
+    """
+    category = ROLE_NATURAL_WEAPON_CATEGORY.get(role_name)
+    if category is None or not weapon_types:
+        return 0.0
+    is_magic = bool(weapon_types & MAGIC_WEAPON_TYPES)
+    is_physical = bool(weapon_types - MAGIC_WEAPON_TYPES)
+    if category == "magic":
+        return NATURAL_ROLE_AFFINITY_WEIGHT if is_magic else 0.0
+    return NATURAL_ROLE_AFFINITY_WEIGHT if is_physical else 0.0
+
+
+def score_all_roles(
+    growth_row: pd.Series,
+    roster_means: pd.Series | None = None,
+    roster_stds: pd.Series | None = None,
+    character_proficiency: set | None = None,
+    character_relic_weapon_types: set | None = None,
+) -> dict[str, float]:
+    """
+    Given a character's growth-rate row, score EVERY role archetype (not
+    just the winner - see detect_natural_role, which is this function plus
+    an argmax) via standardized-growth-rate cosine similarity, the same
+    calculation for each of ROLE_PROFILES's entries.
+
+    This is what lets a caller show "how well does this character fit
+    every role," not just their single auto-detected best fit - "you can
+    only see a character's best-fit role, not how well the tool considers
+    them to fit the others" - see app.py's render_role_fit_chart.
+
+    character_proficiency/character_relic_weapon_types (unioned together),
+    if given, apply a small natural_role_affinity_bonus per role on top of
+    the growth-rate similarity - see that function and
+    NATURAL_ROLE_AFFINITY_WEIGHT for why this is bounded and only some
+    roles are affected.
+    """
+    if roster_means is not None and roster_stds is not None:
+        growth_vector = ((growth_row[STAT_COLS] - roster_means) / roster_stds).to_numpy(dtype=float)
+    else:
+        growth_vector = growth_row[STAT_COLS].to_numpy(dtype=float)
+
+    combined_weapon_types = set(character_proficiency or set()) | set(character_relic_weapon_types or set())
+
+    scores = {}
+    for role_name, weights in ROLE_PROFILES.items():
+        role_vector = role_to_vector(weights, STAT_COLS)
+        score = cosine_similarity(growth_vector, role_vector)
+        score += natural_role_affinity_bonus(role_name, combined_weapon_types)
+        scores[role_name] = score
+    return scores
+
+
 def detect_natural_role(
     growth_row: pd.Series,
     roster_means: pd.Series | None = None,
     roster_stds: pd.Series | None = None,
+    character_proficiency: set | None = None,
+    character_relic_weapon_types: set | None = None,
 ) -> tuple[str, float]:
     """
     Given a character's growth-rate row, find which role archetype their
-    growth rates most resemble.
+    growth rates most resemble (score_all_roles, then argmax).
 
     Growth rates are standardized (z-scored) against the roster before
     comparing, rather than compared as raw percentages. This matters because
@@ -369,20 +492,18 @@ def detect_natural_role(
 
     If roster_means/roster_stds aren't provided, falls back to raw growth
     rates (no standardization) - useful for one-off testing.
+
+    character_proficiency/character_relic_weapon_types: see score_all_roles
+    - a small, bounded nudge toward whichever role matches the character's
+    own starting weapon talent or Hero's Relic, so a character's own gear
+    affinity gets SOME voice in which role is auto-detected, not just in
+    which class gets picked once a role is already chosen.
     """
-    if roster_means is not None and roster_stds is not None:
-        growth_vector = ((growth_row[STAT_COLS] - roster_means) / roster_stds).to_numpy(dtype=float)
-    else:
-        growth_vector = growth_row[STAT_COLS].to_numpy(dtype=float)
-
-    best_role, best_score = None, -1.0
-    for role_name, weights in ROLE_PROFILES.items():
-        role_vector = role_to_vector(weights, STAT_COLS)
-        score = cosine_similarity(growth_vector, role_vector)
-        if score > best_score:
-            best_role, best_score = role_name, score
-
-    return best_role, best_score
+    scores = score_all_roles(
+        growth_row, roster_means, roster_stds, character_proficiency, character_relic_weapon_types
+    )
+    best_role = max(scores, key=scores.get)
+    return best_role, scores[best_role]
 
 
 def score_class_for_role(boost_row: pd.Series, role_weights: dict) -> float:
@@ -546,6 +667,54 @@ def weapon_switch_penalty(
     return WEAPON_SWITCH_PENALTY if is_switch else 0.0
 
 
+def path_weapon_switch_warning(
+    character_name: str,
+    selected_steps: list[dict],
+    weapon_req_lookup: dict | None,
+    character_proficiency: set | None = None,
+) -> str | None:
+    """
+    The same "this path asks <character> to pick up a weapon type never
+    trained" summary recommend_for_character's own "weapon_switch_warning"
+    key produces, but recomputed from an arbitrary ACTUAL path
+    (selected_steps - a list of {"tier", "class"} dicts, in path order) -
+    e.g. after "mix and match" overrides - rather than only ever reflecting
+    the tool's own originally-recommended path.
+
+    This is the fix for "if a warning is displayed and I change the class
+    so there is no longer a class warning, the overall warning is still
+    displayed": the recommended-path warning was computed once, before the
+    user could override anything, and never recomputed afterward - so
+    clearing the flagged step via mix-and-match left the stale summary
+    banner on screen. Callers (see app.py's render_character_tab) should
+    call this AFTER mix-and-match selections are known, using the actually-
+    selected path, and use ITS return value for the summary banner instead
+    of recommend_for_character's original one.
+
+    Threads accumulated_skills forward tier-by-tier exactly like
+    recommend_path/weapon_switch_penalty do, seeded from
+    character_proficiency. Returns None if no step in the actual path is
+    flagged.
+    """
+    accumulated_skills = set(character_proficiency or [])
+    flagged = []
+    for step in selected_steps:
+        class_name = step["class"]
+        if weapon_switch_penalty(class_name, weapon_req_lookup, accumulated_skills, character_proficiency) > 0:
+            flagged.append(f"{step['tier']} ({class_name})")
+        info = weapon_req_lookup.get(class_name) if weapon_req_lookup else None
+        if info:
+            accumulated_skills |= {skill for skill, _ in info["requirements"]}
+    if not flagged:
+        return None
+    names = ", ".join(flagged)
+    return (
+        f"This path asks {character_name} to pick up a weapon type they've never trained - "
+        f"at {names} - which is a slow, costly switch in practice, not the free one the stat "
+        f"numbers alone would suggest."
+    )
+
+
 def load_class_growth_lookup(class_growth_df: pd.DataFrame | None) -> dict:
     """
     Index data/class_growth_rates.csv by class name -> {stat: modifier}
@@ -630,6 +799,30 @@ def score_growth_for_role(growth_mod_row: dict, role_weights: dict) -> float:
     return score
 
 
+def role_relevant_stat_deltas(boost_row: pd.Series, role_weights: dict) -> list[tuple[str, float]]:
+    """
+    A class's own flat stat boosts (data/class_stat_boosts.csv), narrowed
+    to just the stat(s) role_weights actually weighs (weight > 0), in
+    weight-descending order - e.g. for Physical Attacker ({"Str": 1.0,
+    "Spd": 0.5}) and a class boosting Str +3/Spd +1/Def +2, returns
+    [("Str", 3), ("Spd", 1)] - Def is dropped since Physical Attacker
+    doesn't weigh it at all.
+
+    Used so switching to a different class in "mix and match" shows what
+    that switch actually buys FOR THE ROLE being built toward ("+3 Str, +1
+    Spd relevant to Physical Attacker"), rather than only a single fit
+    score number the reader has to trust without seeing the stats behind
+    it - "when changing the class to a different recommended one, we
+    should display the bonus to stats that are relevant to the currently
+    selected role."
+    """
+    stats_by_weight = sorted(
+        (stat for stat, weight in role_weights.items() if weight > 0),
+        key=lambda s: role_weights[s], reverse=True,
+    )
+    return [(stat, float(boost_row[stat])) for stat in stats_by_weight if stat in boost_row.index]
+
+
 def primary_stats_for_role(role_weights: dict) -> list[str]:
     """The stat(s) tied for the highest weight in a role profile - e.g. ["HP", "Def"] for Tank."""
     top_weight = max(role_weights.values())
@@ -689,6 +882,61 @@ def format_requirement(class_name: str, weapon_req_lookup: dict) -> str | None:
         return None
     joiner = " or " if info["requirement_type"] == "OR" else " and "
     return joiner.join(f"{skill} {rank}" for skill, rank in info["requirements"])
+
+
+def combined_requirements_for_classes(
+    class_names: list[str], weapon_req_lookup: dict | None,
+) -> list[tuple[str, str]]:
+    """
+    Merge every class's own certification requirement (see
+    load_weapon_requirements_lookup) across a character's WHOLE path
+    (class_names, in path order - e.g. ["Paladin", "War Master"]) into one
+    skill -> highest-required-rank mapping, e.g. Paladin's own "Lance C and
+    Riding B" plus War Master's own "Axe A and Brawling A" merges into
+    [("Axe","A"), ("Brawling","A"), ("Lance","C"), ("Riding","B")] - "what
+    skill ranks will this character actually need across the whole path
+    they're taking," not just the final tier's own requirement, since a
+    real player has to clear every earlier tier's requirement on the way
+    there too. If the same skill is asked for at two different tiers (rare,
+    but possible), the higher of the two ranks wins (see RANK_INDEX) -
+    whichever rank was reached first is still held once the character moves
+    on, so the higher ask is the one that actually matters for "can this
+    character finish this path."
+
+    Classes with no requirement on file (Unique/story classes locked out of
+    class_weapon_requirements.csv entirely - see NO_CERTIFICATION_CLASSES)
+    are silently skipped, not treated as if they had a "no requirement at
+    all" entry that would somehow blank out an earlier tier's real one.
+
+    Returns a list of (skill, rank) tuples sorted by skill name for a
+    stable, readable display order - empty if no class in class_names has
+    any requirement data (weapon_req_lookup is empty/None, or the whole
+    path is unique/story classes).
+    """
+    if not weapon_req_lookup:
+        return []
+    best: dict[str, str] = {}
+    for class_name in class_names:
+        info = weapon_req_lookup.get(class_name)
+        if info is None:
+            continue
+        for skill, rank in info["requirements"]:
+            if skill not in best or RANK_INDEX.get(rank, -1) > RANK_INDEX.get(best[skill], -1):
+                best[skill] = rank
+    return sorted(best.items())
+
+
+def format_combined_requirements(class_names: list[str], weapon_req_lookup: dict | None) -> str | None:
+    """
+    Human-readable combined-path requirement, e.g. "Axe A, Brawling A,
+    Lance C, Riding B" (see combined_requirements_for_classes) - the
+    whole-path analogue of format_requirement's single-class string. None
+    if the path has no requirement data at all to show.
+    """
+    pairs = combined_requirements_for_classes(class_names, weapon_req_lookup)
+    if not pairs:
+        return None
+    return ", ".join(f"{skill} {rank}" for skill, rank in pairs)
 
 
 def load_character_proficiency_lookup(character_weapon_talent_df: pd.DataFrame | None) -> dict:
@@ -931,6 +1179,61 @@ def eligible_unique_story_class_by_tier(
     return result
 
 
+def unique_class_weapon_category(
+    class_name: str, stat_boosts_df: pd.DataFrame, class_growth_lookup: dict | None,
+) -> str | None:
+    """
+    Approximate "physical" vs "hybrid" weapon_category for a
+    UNIQUE_STORY_CLASS_TIER class, derived from the class's own Mag stat
+    boost (data/class_stat_boosts.csv) and Mag growth-rate modifier
+    (data/class_growth_rates.csv) rather than a fresh hand-curated table -
+    these classes are excluded from class_weapon_requirements.csv entirely
+    (see NO_CERTIFICATION_CLASSES), so they have no certification-based
+    weapon_category the ordinary way, but the stat data already answers the
+    practical question this project's weapon_category concept exists for:
+    does this class actually grow a character's magic.
+
+    Checked against the real data for every UNIQUE_STORY_CLASS_TIER class:
+    Armored Lord/Emperor (Edelgard), High Lord/Great Lord (Dimitri), and
+    Wyvern Master/Barbarossa (Claude) all show a flat 0 Mag boost AND 0 Mag
+    growth modifier - "physical" - while Enlightened One (Byleth) shows a
+    real +3 Mag boost and +10% Mag growth, comparable to its own Str line -
+    "hybrid," matching Byleth's own genuinely dual-focus canon class. This
+    is the fix behind "Dimitri/Claude's unique class gets suggested for a
+    magic-attacking role even though it has no magic access" - see
+    recommend_path, which uses this to decide whether an incompatible
+    unique class should be exempted from the role's narrowing filters and
+    get UNIQUE_CLASS_SCORE_BONUS, or scored (and filtered) like any other
+    candidate.
+
+    Returns None (unknown - callers should not gate on an unknown) if
+    class_name isn't in stat_boosts_df at all.
+    """
+    rows = stat_boosts_df[stat_boosts_df["name"] == class_name]
+    if rows.empty:
+        return None
+    boost_row = rows.iloc[0]
+    mag_boost = float(boost_row["Mag"]) if "Mag" in boost_row.index else 0.0
+    mag_growth = 0.0
+    if class_growth_lookup:
+        mag_growth = float(class_growth_lookup.get(class_name, {}).get("Mag", 0) or 0)
+    return "hybrid" if (mag_boost > 0 or mag_growth > 0) else "physical"
+
+
+def role_compatible_with_weapon_category(role_name: str, category: str | None) -> bool:
+    """
+    Whether a class of the given weapon_category ("physical"/"magic"/
+    "hybrid", or None if unknown) can meaningfully serve role_name, per
+    ROLE_REQUIRED_WEAPON_CATEGORY. A role absent from that dict, or an
+    unknown category, is always compatible (no gate) - see that constant's
+    docstring for why only some roles are gated at all.
+    """
+    required = ROLE_REQUIRED_WEAPON_CATEGORY.get(role_name)
+    if required is None or category is None:
+        return True
+    return category in required
+
+
 def explain_pick(
     boost_row: pd.Series,
     role_weights: dict,
@@ -1100,14 +1403,35 @@ def recommend_path(
         if tier_classes.empty:
             continue
 
-        # The spliced-in unique class (if any) is exempted from the two
-        # narrowing filters below: restrict_to_primary_relevant would
-        # otherwise drop it outright whenever its stat line doesn't touch
-        # the role's primary stat at all (e.g. Armored Lord's 0 Str would
-        # get it dropped for a Physical Attacker role, before the scoring
-        # bonus even gets a chance to weigh it) - it should always reach
+        # The spliced-in unique class (if any) is normally exempted from
+        # the two narrowing filters below: restrict_to_primary_relevant
+        # would otherwise drop it outright whenever its stat line doesn't
+        # touch the role's primary stat at all (e.g. Armored Lord's 0 Str
+        # would get it dropped for a Physical Attacker role, before the
+        # scoring bonus even gets a chance to weigh it) - it should reach
         # scoring, where UNIQUE_CLASS_SCORE_BONUS decides whether it wins.
-        is_unique_row = tier_classes["name"] == unique_class_name
+        #
+        # But that exemption is itself gated on the unique class actually
+        # being ABLE to serve this role at all (see
+        # unique_class_weapon_category/role_compatible_with_weapon_category):
+        # a lord's Master-tier unique class with zero Mag boost and zero
+        # Mag growth (Great Lord, Emperor, Barbarossa - every lord line
+        # except Byleth's own hybrid Enlightened One) has no business being
+        # exempted from the Magic Attacker filters and force-scored with a
+        # +8 bonus regardless of fit - that was the reported "Dimitri/
+        # Claude's unique class gets suggested for a magic role despite
+        # having no magic access" bug. An incompatible unique class still
+        # gets ADDED to the tier's candidate pool (so mix-and-match can
+        # still surface it, and it can still win an honest tie the normal
+        # filters don't resolve), it just doesn't skip the filters or earn
+        # the bonus.
+        unique_gets_bonus = unique_class_name is not None and role_compatible_with_weapon_category(
+            role_name, unique_class_weapon_category(unique_class_name, stat_boosts_df, class_growth_lookup)
+        )
+        if unique_gets_bonus:
+            is_unique_row = tier_classes["name"] == unique_class_name
+        else:
+            is_unique_row = pd.Series(False, index=tier_classes.index)
         unique_row_df = tier_classes[is_unique_row]
         rest = tier_classes[~is_unique_row]
 
@@ -1118,7 +1442,13 @@ def recommend_path(
         rest = restrict_to_primary_relevant(rest, role_weights)
         tier_classes = pd.concat([rest, unique_row_df]) if not unique_row_df.empty else rest
 
-        def score_row(row, unique_class_name=unique_class_name, accumulated_skills=frozenset(accumulated_skills)):
+        if tier_classes.empty:
+            continue
+
+        def score_row(
+            row, unique_class_name=unique_class_name, unique_gets_bonus=unique_gets_bonus,
+            accumulated_skills=frozenset(accumulated_skills),
+        ):
             score = score_class_for_role(row, role_weights)
             score += weapon_growth_bonus(row["name"], weapon_req_lookup, character_proficiency)
             score += relic_affinity_bonus(row["name"], weapon_req_lookup, character_relic_weapon_types)
@@ -1126,7 +1456,7 @@ def recommend_path(
                 growth_mod = class_growth_lookup.get(row["name"], {})
                 score += score_growth_for_role(growth_mod, role_weights) * GROWTH_RATE_SCORE_WEIGHT
             score -= weapon_switch_penalty(row["name"], weapon_req_lookup, accumulated_skills, character_proficiency)
-            if row["name"] == unique_class_name:
+            if unique_gets_bonus and row["name"] == unique_class_name:
                 score += UNIQUE_CLASS_SCORE_BONUS
             return score
 
@@ -1560,6 +1890,7 @@ def recommend_for_character(
     class_growth_df: pd.DataFrame | None = None,
     class_base_stats_df: pd.DataFrame | None = None,
     character_relics_df: pd.DataFrame | None = None,
+    character_gender_override: str | None = None,
 ) -> dict:
     """
     Full recommendation for one character: auto-detects a role if none is
@@ -1605,13 +1936,30 @@ def recommend_for_character(
     None/False, which disables the corresponding feature entirely -
     existing callers that don't pass them keep getting today's behavior
     (join_level 1, no DLC classes, no relic affinity).
+
+    character_gender_override, if given, replaces whatever character_gender_df
+    itself says for this character - the one real use case is the
+    Protagonist: Byleth's gender is recorded as "Any" in
+    data/character_gender.csv (a genuine, permanent fact - Byleth has no
+    fixed gender the way every other character does), which correctly
+    means Byleth is never gender-locked OUT of anything by that CSV alone.
+    But in the actual game the player DOES pick Byleth's gender at the very
+    start, and that choice is exactly as real a gender-lock determinant for
+    Byleth as any other character's fixed gender is for them - a
+    Male-Byleth playthrough genuinely cannot take Falcon Knight, and a
+    Female-Byleth playthrough genuinely cannot take War Master, the same
+    way any other character can't cross a gender-locked class. Without this
+    override, is_class_eligible's "Any" passthrough meant BOTH were always
+    offered to Byleth regardless of which gender the player actually chose -
+    the reported "War Master/Falcon Knight should depend on Byleth's
+    gender" bug. Passing the app's own Byleth-gender selection here
+    (app.py's byleth_gender, translated to "Male"/"Female") makes Byleth's
+    gender-locked-class eligibility behave exactly like everyone else's -
+    every other character's character_gender_override is expected to stay
+    None, since character_gender_df already has their real, fixed gender.
     """
     base_row = base_stats_df[base_stats_df["name"] == character_name].iloc[0]
     growth_row = growth_rates_df[growth_rates_df["name"] == character_name].iloc[0]
-
-    roster_means, roster_stds = compute_roster_stat_stats(growth_rates_df)
-    detected_role, detection_score = detect_natural_role(growth_row, roster_means, roster_stds)
-    used_role = role_name or detected_role
 
     eligibility_lookup = load_eligibility_lookup(eligibility_df) if eligibility_df is not None else None
     character_gender = None
@@ -1619,11 +1967,24 @@ def recommend_for_character(
         gender_row = character_gender_df[character_gender_df["name"] == character_name]
         if not gender_row.empty:
             character_gender = gender_row.iloc[0]["gender"]
+    if character_gender_override is not None:
+        character_gender = character_gender_override
 
     weapon_req_lookup = load_weapon_requirements_lookup(weapon_req_df) if weapon_req_df is not None else None
     character_proficiency_lookup = load_character_proficiency_lookup(character_weapon_talent_df) \
         if character_weapon_talent_df is not None else {}
     character_proficiency = character_proficiency_lookup.get(character_name)
+
+    character_relic_lookup = load_character_relic_lookup(character_relics_df)
+    character_relic_weapon_types = character_relic_lookup.get(character_name)
+
+    roster_means, roster_stds = compute_roster_stat_stats(growth_rates_df)
+    detected_role, detection_score = detect_natural_role(
+        growth_row, roster_means, roster_stds,
+        character_proficiency=character_proficiency,
+        character_relic_weapon_types=character_relic_weapon_types,
+    )
+    used_role = role_name or detected_role
 
     starting_level_lookup = load_starting_level_lookup(starting_level_df)
     join_level = starting_level_lookup.get(character_name, 1)
@@ -1632,8 +1993,6 @@ def recommend_for_character(
 
     class_growth_lookup = load_class_growth_lookup(class_growth_df)
     class_base_stats_lookup = load_class_base_stats_lookup(class_base_stats_df)
-    character_relic_lookup = load_character_relic_lookup(character_relics_df)
-    character_relic_weapon_types = character_relic_lookup.get(character_name)
 
     path = recommend_path(
         stat_boosts_df, used_role, target_level=effective_target_level,

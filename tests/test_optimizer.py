@@ -35,10 +35,12 @@ from src.optimizer import (
     apply_class_base_stat_floor,
     apply_weapon_affinity_fallback,
     base_stats_at_join_level,
+    combined_requirements_for_classes,
     compute_roster_stat_stats,
     detect_natural_role,
     eligible_unique_story_class_by_tier,
     expected_stats_along_path,
+    format_combined_requirements,
     format_requirement,
     is_class_eligible,
     list_eligible_classes_at_tier,
@@ -49,15 +51,21 @@ from src.optimizer import (
     load_eligibility_lookup,
     load_starting_level_lookup,
     load_weapon_requirements_lookup,
+    natural_role_affinity_bonus,
     path_level_bands,
+    path_weapon_switch_warning,
     reachable_tiers,
     recommend_for_character,
     recommend_path,
     relic_affinity_bonus,
     restrict_support_to_magic_classes,
+    role_compatible_with_weapon_category,
+    role_relevant_stat_deltas,
+    score_all_roles,
     score_growth_for_role,
     stats_for_class_at_level,
     stats_for_selected_path,
+    unique_class_weapon_category,
     weapon_growth_bonus,
     weapon_switch_penalty,
 )
@@ -1050,6 +1058,357 @@ class TestGrowthRateScoringDoesNotDestabilizeExistingPicks(unittest.TestCase):
                         starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
                     )
                     self.assertIsInstance(result["path"], list)
+
+
+class TestUniqueClassRoleGate(unittest.TestCase):
+    """
+    Round 6: "Dimitri/Claude's unique class gets suggested for a magic
+    role even though it has no magic access" - see
+    unique_class_weapon_category/role_compatible_with_weapon_category and
+    recommend_path's unique_gets_bonus gate.
+    """
+
+    def test_great_lord_has_no_magic_access(self):
+        self.assertEqual(
+            unique_class_weapon_category("Great Lord", STAT_BOOSTS_DF, CLASS_GROWTH_LOOKUP), "physical",
+        )
+
+    def test_enlightened_one_is_hybrid(self):
+        # Byleth's own master class shows a real +Mag boost and +Mag
+        # growth alongside a comparable Str line - genuinely dual-focus,
+        # unlike every lord line's own master/advanced unique class.
+        self.assertEqual(
+            unique_class_weapon_category("Enlightened One", STAT_BOOSTS_DF, CLASS_GROWTH_LOOKUP), "hybrid",
+        )
+
+    def test_role_compatibility_gate(self):
+        self.assertFalse(role_compatible_with_weapon_category("Magic Attacker", "physical"))
+        self.assertTrue(role_compatible_with_weapon_category("Magic Attacker", "hybrid"))
+        self.assertTrue(role_compatible_with_weapon_category("Physical Attacker", "physical"))
+        self.assertTrue(role_compatible_with_weapon_category("Tank", "physical"))  # Tank isn't gated at all
+        self.assertTrue(role_compatible_with_weapon_category("Magic Attacker", None))  # unknown never blocks
+
+    def test_dimitri_magic_attacker_path_never_uses_his_physical_only_unique_class(self):
+        result = recommend_for_character(
+            "Dimitri", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Magic Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
+            class_base_stats_df=CLASS_BASE_STATS_DF, character_relics_df=CHARACTER_RELICS_DF,
+        )
+        picked = {step["class"] for step in result["path"]}
+        self.assertNotIn("High Lord", picked)
+        self.assertNotIn("Great Lord", picked)
+        # And the path should actually reach a real magic-capable class instead.
+        final_class = result["path"][-1]["class"]
+        info = WEAPON_REQ_LOOKUP.get(final_class)
+        self.assertIsNotNone(info, f"expected {final_class} to have real requirement data")
+        self.assertIn(info["weapon_category"], ("magic", "hybrid"))
+
+    def test_claude_magic_attacker_path_never_uses_his_physical_only_unique_class(self):
+        result = recommend_for_character(
+            "Claude", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Magic Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
+            class_base_stats_df=CLASS_BASE_STATS_DF, character_relics_df=CHARACTER_RELICS_DF,
+        )
+        picked = {step["class"] for step in result["path"]}
+        self.assertNotIn("Wyvern Master", picked)
+        self.assertNotIn("Barbarossa", picked)
+
+    def test_byleth_enlightened_one_still_wins_for_magic_attacker_when_competitive(self):
+        # The Protagonist's own unique class IS magic-capable (hybrid) - it
+        # should still be exempted from the narrowing filters and eligible
+        # for its bonus, unlike the three lords' physical-only ones.
+        result = recommend_for_character(
+            "Protagonist", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Magic Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
+            class_base_stats_df=CLASS_BASE_STATS_DF, character_relics_df=CHARACTER_RELICS_DF,
+        )
+        master_step = next(step for step in result["path"] if step["tier"] == "Master")
+        self.assertEqual(master_step["class"], "Enlightened One")
+        self.assertTrue(master_step["is_unique_class"])
+
+    def test_edelgard_physical_attacker_path_still_unaffected(self):
+        # Physical Attacker is exactly what Armored Lord/Emperor ARE built
+        # for - the gate should be a no-op here, same as before round 6.
+        result = recommend_for_character(
+            "Edelgard", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Physical Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
+            class_base_stats_df=CLASS_BASE_STATS_DF, character_relics_df=CHARACTER_RELICS_DF,
+        )
+        master_step = next(step for step in result["path"] if step["tier"] == "Master")
+        self.assertEqual(master_step["class"], "Emperor")
+
+
+class TestBylethGenderEligibility(unittest.TestCase):
+    """
+    Round 6: "War Master is male-only, Falcon Knight is female-only, so it
+    should depend on the gender the player picked for Byleth" - see
+    recommend_for_character's character_gender_override.
+    """
+
+    def test_male_byleth_is_ineligible_for_falcon_knight(self):
+        self.assertFalse(is_class_eligible("Protagonist", "Falcon Knight", ELIGIBILITY_LOOKUP, "Male"))
+
+    def test_female_byleth_is_ineligible_for_war_master(self):
+        self.assertFalse(is_class_eligible("Protagonist", "War Master", ELIGIBILITY_LOOKUP, "Female"))
+
+    def test_male_byleth_is_eligible_for_war_master(self):
+        self.assertTrue(is_class_eligible("Protagonist", "War Master", ELIGIBILITY_LOOKUP, "Male"))
+
+    def test_female_byleth_is_eligible_for_falcon_knight(self):
+        self.assertTrue(is_class_eligible("Protagonist", "Falcon Knight", ELIGIBILITY_LOOKUP, "Female"))
+
+    def test_without_override_any_gender_is_never_blocked(self):
+        # The CSV's own "Any" value, with no override applied - documents
+        # the pre-override degrade-gracefully behavior is unchanged.
+        self.assertTrue(is_class_eligible("Protagonist", "Falcon Knight", ELIGIBILITY_LOOKUP, "Any"))
+        self.assertTrue(is_class_eligible("Protagonist", "War Master", ELIGIBILITY_LOOKUP, "Any"))
+
+    def test_recommend_for_character_override_replaces_the_csvs_any(self):
+        male_result = recommend_for_character(
+            "Protagonist", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Speed/Precision", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
+            character_gender_override="Male",
+        )
+        picked = {step["class"] for step in male_result["path"]}
+        self.assertNotIn("Falcon Knight", picked)
+
+        female_result = recommend_for_character(
+            "Protagonist", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Physical Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
+            character_gender_override="Female",
+        )
+        picked = {step["class"] for step in female_result["path"]}
+        self.assertNotIn("War Master", picked)
+
+    def test_no_override_means_character_gender_df_still_used(self):
+        # A regular character's override stays None in every real caller -
+        # passing None here should behave exactly like before this feature
+        # existed (their own fixed gender from the CSV, untouched).
+        result_a = recommend_for_character(
+            "Lysithea", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Magic Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
+        )
+        result_b = recommend_for_character(
+            "Lysithea", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Magic Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
+            character_gender_override=None,
+        )
+        self.assertEqual(result_a["path"], result_b["path"])
+
+
+class TestNaturalRoleAffinity(unittest.TestCase):
+    """
+    Round 6: "how much are a character's natural proficiencies being
+    taken into account for their default role" / "Lorenz's relic only
+    supports mages, but he's still suggested as a Tank" - see
+    natural_role_affinity_bonus/score_all_roles.
+    """
+
+    def test_magic_weapon_types_boost_magic_leaning_roles(self):
+        self.assertGreater(natural_role_affinity_bonus("Magic Attacker", {"Reason"}), 0.0)
+        self.assertGreater(natural_role_affinity_bonus("Support", {"Faith"}), 0.0)
+
+    def test_physical_weapon_types_boost_physical_leaning_roles(self):
+        self.assertGreater(natural_role_affinity_bonus("Physical Attacker", {"Sword"}), 0.0)
+
+    def test_no_cross_contamination_between_categories(self):
+        self.assertEqual(natural_role_affinity_bonus("Magic Attacker", {"Sword", "Lance"}), 0.0)
+        self.assertEqual(natural_role_affinity_bonus("Physical Attacker", {"Reason", "Faith"}), 0.0)
+
+    def test_unmapped_roles_are_never_nudged(self):
+        self.assertEqual(natural_role_affinity_bonus("Tank", {"Reason"}), 0.0)
+        self.assertEqual(natural_role_affinity_bonus("Speed/Precision", {"Sword"}), 0.0)
+
+    def test_empty_or_missing_weapon_types_is_a_noop(self):
+        self.assertEqual(natural_role_affinity_bonus("Magic Attacker", None), 0.0)
+        self.assertEqual(natural_role_affinity_bonus("Magic Attacker", set()), 0.0)
+
+    def test_score_all_roles_covers_every_role_profile(self):
+        growth_row = GROWTH_RATES_DF[GROWTH_RATES_DF["name"] == "Bernadetta"].iloc[0]
+        scores = score_all_roles(growth_row, ROSTER_MEANS, ROSTER_STDS)
+        self.assertEqual(set(scores.keys()), set(ROLE_PROFILES.keys()))
+
+    def test_detect_natural_role_matches_score_all_roles_argmax(self):
+        growth_row = GROWTH_RATES_DF[GROWTH_RATES_DF["name"] == "Bernadetta"].iloc[0]
+        role, score = detect_natural_role(growth_row, ROSTER_MEANS, ROSTER_STDS)
+        scores = score_all_roles(growth_row, ROSTER_MEANS, ROSTER_STDS)
+        self.assertEqual(role, max(scores, key=scores.get))
+        self.assertAlmostEqual(score, scores[role])
+
+    def test_lorenz_relic_affinity_flips_a_genuinely_close_tank_vs_support_call(self):
+        # Documents the real-data regression this feature fixes: Lorenz's
+        # own relic (Thyrsus, Reason) plus his physical starting
+        # proficiency (Lance/Riding) makes Tank vs Support close enough on
+        # growth rates alone that the relic's magic affinity should be
+        # enough to tip Support over Tank - see the module's own
+        # NATURAL_ROLE_AFFINITY_WEIGHT docstring for the calibration intent.
+        growth_row = GROWTH_RATES_DF[GROWTH_RATES_DF["name"] == "Lorenz"].iloc[0]
+        without_affinity = score_all_roles(growth_row, ROSTER_MEANS, ROSTER_STDS)
+        self.assertGreater(without_affinity["Tank"], without_affinity["Support"])
+
+        proficiency = PROFICIENCY_LOOKUP.get("Lorenz")
+        relic_types = CHARACTER_RELIC_LOOKUP.get("Lorenz")
+        self.assertEqual(relic_types, {"Reason"})
+        with_affinity = score_all_roles(
+            growth_row, ROSTER_MEANS, ROSTER_STDS,
+            character_proficiency=proficiency, character_relic_weapon_types=relic_types,
+        )
+        self.assertGreater(with_affinity["Support"], with_affinity["Tank"])
+
+    def test_affinity_nudge_never_overrides_a_clear_growth_rate_signal(self):
+        # A character with an overwhelming, unambiguous growth-rate lean
+        # shouldn't flip roles just because their proficiency happens to
+        # point elsewhere - the nudge is calibrated to break close ties,
+        # not override real signal. Edelgard's own Physical Attacker lean
+        # is a large, well-established margin (see
+        # TestRoleDetectionRegression) - a physical-weapon proficiency
+        # nudge toward the SAME role she already wins shouldn't be needed
+        # to keep her a Physical Attacker either way.
+        role, _ = detect_natural_role(
+            GROWTH_RATES_DF[GROWTH_RATES_DF["name"] == "Edelgard"].iloc[0], ROSTER_MEANS, ROSTER_STDS,
+            character_proficiency=PROFICIENCY_LOOKUP.get("Edelgard"),
+            character_relic_weapon_types=CHARACTER_RELIC_LOOKUP.get("Edelgard"),
+        )
+        self.assertEqual(role, "Physical Attacker")
+
+
+class TestCombinedPathRequirements(unittest.TestCase):
+    """
+    Round 6: "final class requirement display should show the skill rank
+    needs for each class the character is going to use in the path" - see
+    combined_requirements_for_classes/format_combined_requirements.
+    """
+
+    def test_merges_requirements_across_the_whole_path(self):
+        pairs = combined_requirements_for_classes(["Cavalier", "Paladin"], WEAPON_REQ_LOOKUP)
+        skills = dict(pairs)
+        self.assertIn("Lance", skills)
+        self.assertIn("Riding", skills)
+
+    def test_higher_rank_wins_when_the_same_skill_repeats(self):
+        # Fabricate a tiny lookup where the same skill appears at two
+        # different ranks across two "tiers" - the higher one should win.
+        lookup = {
+            "StepA": {"tier": "Beginner", "weapon_category": "physical", "requirement_type": "AND",
+                      "requirements": [("Sword", "D")]},
+            "StepB": {"tier": "Advanced", "weapon_category": "physical", "requirement_type": "AND",
+                      "requirements": [("Sword", "B")]},
+        }
+        pairs = combined_requirements_for_classes(["StepA", "StepB"], lookup)
+        self.assertEqual(dict(pairs)["Sword"], "B")
+
+    def test_classes_with_no_requirement_data_are_skipped_not_blanking(self):
+        pairs = combined_requirements_for_classes(["Great Lord", "Paladin"], WEAPON_REQ_LOOKUP)
+        skills = dict(pairs)
+        self.assertIn("Lance", skills)  # Paladin's own requirement survives
+
+    def test_empty_lookup_or_path_returns_empty(self):
+        self.assertEqual(combined_requirements_for_classes([], WEAPON_REQ_LOOKUP), [])
+        self.assertEqual(combined_requirements_for_classes(["Paladin"], {}), [])
+        self.assertEqual(combined_requirements_for_classes(["Paladin"], None), [])
+
+    def test_format_combined_requirements_returns_a_readable_string(self):
+        text = format_combined_requirements(["Cavalier", "Paladin"], WEAPON_REQ_LOOKUP)
+        self.assertIsInstance(text, str)
+        self.assertIn("Lance", text)
+
+    def test_format_combined_requirements_none_when_empty(self):
+        self.assertIsNone(format_combined_requirements(["Great Lord"], WEAPON_REQ_LOOKUP))
+
+
+class TestPathWeaponSwitchWarning(unittest.TestCase):
+    """
+    Round 6: "if a warning is displayed and I change the class so there is
+    no longer a class warning, the overall warning is still displayed" -
+    see path_weapon_switch_warning, which recomputes the summary from the
+    ACTUAL selected path instead of reusing recommend_for_character's
+    original one.
+    """
+
+    def test_flags_the_same_steps_recommend_path_would(self):
+        result = recommend_for_character(
+            "Catherine", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Physical Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
+        )
+        self.assertIsNotNone(result["weapon_switch_warning"])
+        selected_steps = [{"tier": s["tier"], "class": s["class"]} for s in result["path"]]
+        recomputed = path_weapon_switch_warning(
+            "Catherine", selected_steps, WEAPON_REQ_LOOKUP, PROFICIENCY_LOOKUP.get("Catherine"),
+        )
+        self.assertIsNotNone(recomputed)
+
+    def test_overriding_the_flagged_tier_clears_the_warning(self):
+        # Catherine's Swordmaster -> Wyvern Lord jump is the documented
+        # real flag (test_catherine_swordmaster_to_wyvern_lord_flags_the_
+        # real_complaint) - overriding Master away from Wyvern Lord to
+        # something Sword-based should clear the warning entirely, not
+        # leave a stale one behind.
+        selected_steps = [
+            {"tier": "Beginner", "class": "Myrmidon"},
+            {"tier": "Intermediate", "class": "Mercenary"},
+            {"tier": "Advanced", "class": "Swordmaster"},
+            {"tier": "Master", "class": "Swordmaster"},  # not a real Master class, but exercises "no switch"
+        ]
+        recomputed = path_weapon_switch_warning(
+            "Catherine", selected_steps, WEAPON_REQ_LOOKUP, PROFICIENCY_LOOKUP.get("Catherine"),
+        )
+        self.assertIsNone(recomputed)
+
+    def test_no_flagged_steps_returns_none(self):
+        selected_steps = [{"tier": "Beginner", "class": "Myrmidon"}]
+        self.assertIsNone(
+            path_weapon_switch_warning("Catherine", selected_steps, WEAPON_REQ_LOOKUP, {"Sword"})
+        )
+
+
+class TestRoleRelevantStatDeltas(unittest.TestCase):
+    """
+    Round 6: "when changing the class to a different recommended one, we
+    should display the bonus to stats that are relevant to the currently
+    selected role" - see role_relevant_stat_deltas.
+    """
+
+    def test_narrows_to_only_the_roles_weighted_stats(self):
+        row = STAT_BOOSTS_DF[STAT_BOOSTS_DF["name"] == "Warrior"].iloc[0]
+        deltas = role_relevant_stat_deltas(row, ROLE_PROFILES["Physical Attacker"])
+        stats = [stat for stat, _ in deltas]
+        self.assertEqual(set(stats), {"Str", "Spd"})
+
+    def test_sorted_by_role_weight_descending(self):
+        row = STAT_BOOSTS_DF[STAT_BOOSTS_DF["name"] == "Warrior"].iloc[0]
+        deltas = role_relevant_stat_deltas(row, ROLE_PROFILES["Physical Attacker"])
+        self.assertEqual([stat for stat, _ in deltas], ["Str", "Spd"])  # Str weight 1.0 > Spd weight 0.5
+
+    def test_empty_when_role_weights_stat_absent_from_row(self):
+        row = pd.Series({"HP": 1})
+        self.assertEqual(role_relevant_stat_deltas(row, {"Str": 1.0}), [])
 
 
 if __name__ == "__main__":

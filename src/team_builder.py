@@ -27,7 +27,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.optimizer import ROLE_PROFILES, detect_natural_role, recommend_for_character
+from src.optimizer import (
+    ROLE_PROFILES,
+    detect_natural_role,
+    load_character_proficiency_lookup,
+    load_character_relic_lookup,
+    recommend_for_character,
+)
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -278,7 +284,12 @@ def format_recruitment_note(character_name: str, recruitment_lookup: dict) -> st
     return note
 
 
-def assign_roles(candidates: list[str], growth_rates_df: pd.DataFrame) -> pd.DataFrame:
+def assign_roles(
+    candidates: list[str],
+    growth_rates_df: pd.DataFrame,
+    character_weapon_talent_df: pd.DataFrame | None = None,
+    character_relics_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """
     For each candidate character, auto-detect their best-fitting role.
     Returns a DataFrame: character, role, score.
@@ -289,17 +300,33 @@ def assign_roles(candidates: list[str], growth_rates_df: pd.DataFrame) -> pd.Dat
     does the same. Pass the full roster's growth_rates_df here even if
     candidates is a smaller pool (e.g. one route), so "unusual" is measured
     against the whole cast, not just whoever's in the pool.
+
+    character_weapon_talent_df/character_relics_df, if given, feed each
+    candidate's own starting weapon proficiency and Hero's Relic weapon
+    type into detect_natural_role's small natural-role affinity nudge (see
+    optimizer.natural_role_affinity_bonus) - the same signal
+    optimizer.recommend_for_character uses for the Character Optimizer tab,
+    so Team Builder's own role auto-detection (and therefore its role
+    coverage/round-robin grouping) doesn't quietly use a less-informed
+    version of the same detection logic. Omit for the old growth-rate-only
+    behavior.
     """
     from src.optimizer import compute_roster_stat_stats
 
     roster_means, roster_stds = compute_roster_stat_stats(growth_rates_df)
+    proficiency_lookup = load_character_proficiency_lookup(character_weapon_talent_df)
+    relic_lookup = load_character_relic_lookup(character_relics_df)
 
     rows = []
     for name in candidates:
         growth_row = growth_rates_df[growth_rates_df["name"] == name]
         if growth_row.empty:
             continue
-        role, score = detect_natural_role(growth_row.iloc[0], roster_means, roster_stds)
+        role, score = detect_natural_role(
+            growth_row.iloc[0], roster_means, roster_stds,
+            character_proficiency=proficiency_lookup.get(name),
+            character_relic_weapon_types=relic_lookup.get(name),
+        )
         rows.append({"character": name, "role": role, "score": score})
 
     return pd.DataFrame(rows).sort_values("score", ascending=False).reset_index(drop=True)
@@ -330,6 +357,8 @@ def build_balanced_team(
     recruitment_lookup: dict | None = None,
     cross_house_names: set | None = None,
     force_deployed: set | None = None,
+    character_weapon_talent_df: pd.DataFrame | None = None,
+    character_relics_df: pd.DataFrame | None = None,
 ) -> list[dict]:
     """
     Build a team of team_size characters from the candidate pool, balancing
@@ -376,7 +405,10 @@ def build_balanced_team(
     effective_exclude = exclude - set(must_include)
 
     working_candidates = [c for c in candidates if c not in effective_exclude]
-    assignments = assign_roles(working_candidates, growth_rates_df)
+    assignments = assign_roles(
+        working_candidates, growth_rates_df,
+        character_weapon_talent_df=character_weapon_talent_df, character_relics_df=character_relics_df,
+    )
     if assignments.empty:
         return []
 
@@ -494,6 +526,7 @@ def build_team_with_paths(
     class_base_stats_df: pd.DataFrame | None = None,
     character_relics_df: pd.DataFrame | None = None,
     force_deployed: set | None = None,
+    byleth_gender: str | None = None,
 ) -> list[dict]:
     """
     Like build_balanced_team, but also attaches each member's full class-path
@@ -523,12 +556,22 @@ def build_team_with_paths(
     still only appear on the team if build_balanced_team's own round-robin
     picks them; pass them as must_include too if they should always be on
     the team (see app.py's Team Builder tab).
+
+    byleth_gender ("Male"/"Female"), if given, is passed to
+    recommend_for_character as character_gender_override for the
+    Protagonist specifically (see that function's docstring) - the Team
+    Builder analogue of the Character Optimizer tab's Byleth-gender
+    selector, so Team Builder's own Byleth (force-deployed on every route -
+    see mandatory_names_for_route) is correctly gender-locked out of
+    War Master/Falcon Knight per the chosen gender too, not just when
+    Byleth is optimized individually on the other tab.
     """
     team = build_balanced_team(
         candidates, growth_rates_df, team_size,
         must_include=must_include, exclude=exclude, rng=rng,
         recruitment_lookup=recruitment_lookup, cross_house_names=cross_house_names,
         force_deployed=force_deployed,
+        character_weapon_talent_df=character_weapon_talent_df, character_relics_df=character_relics_df,
     )
     locked_builds = locked_builds or {}
 
@@ -552,6 +595,7 @@ def build_team_with_paths(
             starting_level_df=starting_level_df, include_dlc_classes=include_dlc_classes,
             class_growth_df=class_growth_df, class_base_stats_df=class_base_stats_df,
             character_relics_df=character_relics_df,
+            character_gender_override=byleth_gender if member["character"] == "Protagonist" else None,
         )
         member["path"] = full_rec["path"]
         member["final_class"] = full_rec["path"][-1]["class"] if full_rec["path"] else None

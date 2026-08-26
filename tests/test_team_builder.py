@@ -367,5 +367,87 @@ class TestLockedBuilds(unittest.TestCase):
             self.assertTrue(member["path"])  # recomputed normally
 
 
+class TestByLethGenderThreadsThroughTeamBuilder(unittest.TestCase):
+    """
+    Round 6: Team Builder's own force-deployed Byleth (mandatory_names_for_route)
+    should be gender-locked out of War Master/Falcon Knight per the app's
+    Byleth-gender selection too, not just when optimized individually on
+    the Character Optimizer tab - see build_team_with_paths's byleth_gender
+    param.
+    """
+
+    def test_male_byleth_never_gets_falcon_knight_on_the_team(self):
+        team = build_team_with_paths(
+            ["Protagonist"], BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            team_size=1, target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, must_include=["Protagonist"],
+            byleth_gender="Male",
+        )
+        byleth = next(m for m in team if m["character"] == "Protagonist")
+        picked = {step["class"] for step in byleth["path"]}
+        self.assertNotIn("Falcon Knight", picked)
+
+    def test_female_byleth_never_gets_war_master_on_the_team(self):
+        team = build_team_with_paths(
+            ["Protagonist"], BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            team_size=1, target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, must_include=["Protagonist"],
+            byleth_gender="Female",
+        )
+        byleth = next(m for m in team if m["character"] == "Protagonist")
+        picked = {step["class"] for step in byleth["path"]}
+        self.assertNotIn("War Master", picked)
+
+    def test_byleth_gender_never_affects_other_characters(self):
+        team_male = build_team_with_paths(
+            ["Bernadetta"], BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            team_size=1, target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, must_include=["Bernadetta"], byleth_gender="Male",
+        )
+        team_female = build_team_with_paths(
+            ["Bernadetta"], BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            team_size=1, target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, must_include=["Bernadetta"], byleth_gender="Female",
+        )
+        self.assertEqual(team_male[0]["path"], team_female[0]["path"])
+
+
+class TestAssignRolesUsesProficiencyAndRelics(unittest.TestCase):
+    """
+    Round 6: Team Builder's own role auto-detection (assign_roles) should
+    use the same natural-role affinity nudge (proficiency + relics) the
+    Character Optimizer tab does, so the two don't quietly disagree - see
+    assign_roles's character_weapon_talent_df/character_relics_df params.
+    """
+
+    def test_accepts_proficiency_and_relic_dfs_without_raising(self):
+        from src.team_builder import assign_roles
+        character_relics_df = pd.read_csv(DATA_DIR / "character_relics.csv")
+        assignments = assign_roles(
+            ["Lorenz", "Bernadetta", "Edelgard"], GROWTH_RATES_DF,
+            character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            character_relics_df=character_relics_df,
+        )
+        self.assertEqual(set(assignments["character"]), {"Lorenz", "Bernadetta", "Edelgard"})
+
+    def test_lorenz_detects_as_support_with_relic_data_matching_the_character_tab(self):
+        from src.team_builder import assign_roles
+        character_relics_df = pd.read_csv(DATA_DIR / "character_relics.csv")
+        assignments = assign_roles(
+            ["Lorenz"], GROWTH_RATES_DF,
+            character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            character_relics_df=character_relics_df,
+        )
+        self.assertEqual(assignments.iloc[0]["role"], "Support")
+
+
 if __name__ == "__main__":
     unittest.main()
