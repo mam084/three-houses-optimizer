@@ -5,7 +5,7 @@ An interactive tool for Fire Emblem: Three Houses that recommends a class path f
 Built as a portfolio project. Started as a Pokemon competitive team-builder; pivoted here to dig into a genuinely different kind of problem: simulating stat growth and class progression rather than looking up static competitive data.
 
 ![Dashboard screenshot](docs/screenshot.png)
-(docs/screenshot_2.png)
+![Dashboard screenshot](docs/screenshot_2.png)
 
 ## Features
 
