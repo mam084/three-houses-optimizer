@@ -3,7 +3,6 @@ Myrmidon,Beginner,physical,OR,Sword:D
 Soldier,Beginner,physical,OR,Lance:D
 Fighter,Beginner,physical,OR,Axe:D|Bow:D|Brawling:D
 Monk,Beginner,magic,OR,Reason:D|Faith:D
-Lord,Intermediate,physical,AND,Sword:D+|Authority:C
 Mercenary,Intermediate,physical,AND,Sword:C
 Thief,Intermediate,physical,AND,Sword:C
 Armored Knight,Intermediate,physical,AND,Axe:C|Heavy Armour:D

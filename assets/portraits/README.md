@@ -2,8 +2,13 @@
 
 `app.py` looks for a portrait image here for every character it displays
 (character picker, team roster cards). If a file's here, it's shown; if
-not, the UI falls back to a plain placeholder tile with the character's
-initial - it never breaks or leaves a gap.
+not - the default for virtually everyone, since no real art is bundled
+(see below) - the UI falls back to a placeholder tile with the character's
+initial, colored by their own house/route (Black Eagles, Blue Lions,
+Golden Deer, Church of Seiros, Knights of Seiros, the Protagonist/Sothis's
+own house, or DLC-exclusive - see `HOUSE_COLORS` in `app.py`), so
+portraits stay visually meaningful without needing any actual art at all.
+It never breaks or leaves a gap.
 
 ## Why there aren't any checked in
 

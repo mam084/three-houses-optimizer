@@ -24,13 +24,16 @@ from src.optimizer import (
     TIER_ORDER,
     format_requirement,
     list_eligible_classes_at_tier,
+    load_character_proficiency_lookup,
+    load_class_base_stats_lookup,
     load_class_growth_lookup,
     load_eligibility_lookup,
     load_weapon_requirements_lookup,
     recommend_for_character,
     score_class_for_role,
     score_growth_for_role,
-    stats_for_class_at_level,
+    stats_for_selected_path,
+    weapon_switch_penalty,
 )
 from src.team_builder import (
     DLC_HOUSE,
@@ -46,6 +49,37 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 PORTRAIT_DIR = Path(__file__).resolve().parent / "assets" / "portraits"
 DEFAULT_TARGET_LEVEL = 30
 
+# Route-based color coding for the portrait tile/badge (see render_portrait) -
+# each character's data/character_base_stats.csv "house" value maps to a
+# color evoking that house/route's own game branding, so the fallback tile
+# (still all anyone sees by default - see render_portrait's docstring) reads
+# as "which house/route is this character from" at a glance instead of a
+# single flat neutral box. A house absent from this map (there shouldn't be
+# one - every character_base_stats.csv "house" value is covered) falls back
+# to DEFAULT_PORTRAIT_COLOR.
+HOUSE_COLORS = {
+    "Black Eagles": "#7a1620",  # crimson/black, the house's own color scheme
+    "Blue Lions": "#1d3f6e",  # royal blue
+    "Golden Deer": "#8a5a12",  # gold/amber
+    "Church of Seiros": "#7a6a2a",  # muted gold - the Church's own heraldry
+    "Knights of Seiros": "#455163",  # steel gray - knights, not students
+    "You and the Enigmatic Girl": "#1f6e5c",  # teal - Byleth/Sothis's own mint-teal color motif
+    DLC_HOUSE: "#5a1f6e",  # purple - Cindered Shadows/Abyss's distinct visual identity
+}
+DEFAULT_PORTRAIT_COLOR = "#2b2b3a"
+
+# data/class_eligibility.csv's Dancer row documents "only one character can
+# hold it per playthrough" and "excludes the Protagonist" in its unlock_note
+# text, but (like every Unique-tier class not covered by
+# UNIQUE_STORY_CLASS_TIER) that's not enforced anywhere in is_class_eligible
+# - Dancer is open-eligibility data-wise, unlocked via the White Heron Cup
+# event rather than a certification exam. Both real-game constraints are
+# enforced here instead, at the one place Dancer is actually surfaced (see
+# render_team_tab's Dancer selectbox): the single-select widget itself makes
+# "only one character" structural, and this set excludes the Protagonist
+# from the option list.
+DANCER_INELIGIBLE_CHARACTERS = {"Protagonist"}
+
 st.set_page_config(page_title="Three Houses Class Optimizer", page_icon="⚔️", layout="wide")
 
 
@@ -55,7 +89,7 @@ def load_data() -> tuple[pd.DataFrame, ...]:
         "character_base_stats.csv", "character_growth_rates.csv", "class_stat_boosts.csv",
         "class_eligibility.csv", "character_gender.csv", "class_weapon_requirements.csv",
         "character_weapon_talent.csv", "recruitment_requirements.csv", "character_starting_level.csv",
-        "class_growth_rates.csv",
+        "class_growth_rates.csv", "class_base_stats.csv", "character_relics.csv",
     ]
     missing = [f for f in required if not (DATA_DIR / f).exists()]
     if missing:
@@ -78,6 +112,8 @@ def load_data() -> tuple[pd.DataFrame, ...]:
         pd.read_csv(DATA_DIR / "recruitment_requirements.csv"),
         pd.read_csv(DATA_DIR / "character_starting_level.csv"),
         pd.read_csv(DATA_DIR / "class_growth_rates.csv"),
+        pd.read_csv(DATA_DIR / "class_base_stats.csv"),
+        pd.read_csv(DATA_DIR / "character_relics.csv"),
     )
 
 
@@ -114,37 +150,88 @@ def get_portrait_path(character_name: str) -> Path | None:
     return None
 
 
-def render_portrait(character_name: str, width: int = 96):
+def get_house_lookup(base_stats_df: pd.DataFrame) -> dict:
+    """Index data/character_base_stats.csv's "house" column by character name, for render_portrait's color coding."""
+    return dict(zip(base_stats_df["name"], base_stats_df["house"]))
+
+
+def render_portrait(character_name: str, house: str | None = None, width: int = 96):
+    """
+    Render a character's portrait. If an image has been placed in
+    assets/portraits/ for them (see get_portrait_path/that folder's README),
+    it's used as-is - "bring your own art" stays supported for anyone who
+    wants to add their own. Otherwise (the default for virtually everyone,
+    since actual Three Houses character art isn't this project's to ship -
+    see get_portrait_path), the fallback tile is color-coded by house/route
+    (see HOUSE_COLORS) rather than a single flat neutral box, so portraits
+    are still visually distinct and meaningful - which house/route a
+    character belongs to - without redistributing anyone's IP. `house`
+    should be that character's data/character_base_stats.csv "house" value
+    (see get_house_lookup); omitted or unrecognized falls back to
+    DEFAULT_PORTRAIT_COLOR.
+    """
     portrait = get_portrait_path(character_name)
     if portrait:
         st.image(str(portrait), width=width)
     else:
+        color = HOUSE_COLORS.get(house, DEFAULT_PORTRAIT_COLOR)
+        title = house or ""
         st.markdown(
-            f"<div style='width:{width}px;height:{width}px;border-radius:8px;background:#2b2b3a;"
-            f"display:flex;align-items:center;justify-content:center;font-size:{width//3}px;'>"
+            f"<div title='{title}' style='width:{width}px;height:{width}px;border-radius:8px;"
+            f"background:{color};color:#fff;display:flex;align-items:center;justify-content:center;"
+            f"font-size:{width//3}px;font-weight:600;'>"
             f"{character_name[0]}</div>",
             unsafe_allow_html=True,
         )
 
 
-def growth_caption(class_name: str, class_growth_lookup: dict) -> str | None:
+def render_growth_rate_mini_chart(class_name: str, class_growth_lookup: dict, key: str) -> bool:
     """
-    Human-readable summary of a class's own growth-RATE modifiers (see
-    optimizer.load_class_growth_lookup) - the top couple of stats it
-    speeds up, e.g. "Growth: +15% Str, +10% Spd" - or None if the class
-    has no meaningfully positive modifier on file. This is a genuinely
-    different mechanic from a class's flat one-time stat boost (shown
-    separately as "boosts X"): growth modifiers change how fast a stat
-    climbs on every level-up spent in that class, compounding over time.
+    Compact per-stat growth-RATE modifier chart for one class (see
+    optimizer.load_class_growth_lookup) - all of STAT_COLS at a glance, as
+    a small horizontal bar chart, rather than a text summary of just the
+    top couple of stats (the previous behavior here - see growth_caption
+    in prior rounds). This is what makes growth-rate data visible on the
+    Character Optimizer tab's own recommended-path view (render_path_with_
+    mixmatch), not only when separately browsing a class in the Class
+    Explorer tab (see render_class_explorer_tab's own, larger version of
+    this same chart) - the Character Optimizer previously showed nothing
+    beyond a 2-stat text caption here.
+
+    Horizontal bars (stats on the y-axis) read better than vertical ones in
+    the narrow per-tier columns render_path_with_mixmatch lays these out
+    in - 9 rotated x-axis tick labels wouldn't fit, 9 horizontal bars do.
+    Bars are colored by sign (a growth-rate modifier can be negative, e.g.
+    Armored classes trading away Spd) so a negative modifier reads as a
+    real cost, not just a smaller bar.
+
+    Returns whether a chart was actually drawn - False (with a fallback
+    caption, matching the Class Explorer tab's own wording) if class_name
+    has no growth-rate data on file, so callers can render nothing further
+    for that case.
     """
     mods = class_growth_lookup.get(class_name)
     if not mods:
-        return None
-    positive = sorted(((s, v) for s, v in mods.items() if v > 0), key=lambda sv: sv[1], reverse=True)
-    if not positive:
-        return None
-    parts = [f"+{int(v) if float(v).is_integer() else v}% {s}" for s, v in positive[:2]]
-    return "Growth: " + ", ".join(parts)
+        st.caption(f"No growth-rate modifier data on file for {class_name}.")
+        return False
+
+    values = [mods.get(s, 0) for s in STAT_COLS]
+    colors = ["#d1453b" if v < 0 else "#2e8b57" for v in values]
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=values, y=STAT_COLS, orientation="h", marker_color=colors,
+        text=[f"{v:+g}%" for v in values], textposition="outside",
+    ))
+    max_abs = max((abs(v) for v in values), default=1) or 1
+    fig.update_layout(
+        height=260,
+        margin=dict(l=0, r=10, t=10, b=10),
+        xaxis=dict(title=None, range=[-max_abs * 1.5, max_abs * 1.5], zeroline=True),
+        yaxis=dict(autorange="reversed"),  # HP (STAT_COLS[0]) on top, reading order
+        showlegend=False,
+    )
+    st.plotly_chart(fig, use_container_width=True, key=key)
+    return True
 
 
 def render_path_with_mixmatch(
@@ -172,9 +259,10 @@ def render_path_with_mixmatch(
     A user's own pick (not the recommended class) still shows its fit
     score against role_weights and its certification weapon-rank
     requirement (weapon_req_lookup - see load_weapon_requirements_lookup),
-    plus its own growth-rate modifiers (growth_caption), the same
-    information the recommended pick gets, rather than just "your pick,
-    overrides the recommendation" with no numbers to compare against.
+    plus its own growth-rate modifiers (render_growth_rate_mini_chart), the
+    same information the recommended pick gets, rather than just "your
+    pick, overrides the recommendation" with no numbers to compare
+    against.
 
     role_used is folded into every selectbox's widget key - switching the
     target role (or auto-detect landing on a different role) now resets
@@ -213,9 +301,10 @@ def render_path_with_mixmatch(
                 st.caption(f"fit score {step['score']}")
                 if step.get("requirement"):
                     st.caption(f"Requires: {step['requirement']}")
-                growth_note = growth_caption(choice, class_growth_lookup)
-                if growth_note:
-                    st.caption(growth_note)
+                with st.expander("📈 Growth-rate modifiers"):
+                    render_growth_rate_mini_chart(
+                        choice, class_growth_lookup, key=f"growth_mini_{character}_{role_used}_{step['tier']}",
+                    )
                 if step.get("weapon_switch_warning"):
                     st.warning("Requires a weapon type never trained so far - a slow switch in practice.", icon="⚠️")
                 st.caption(step["why"])
@@ -231,9 +320,10 @@ def render_path_with_mixmatch(
                 requirement = format_requirement(choice, weapon_req_lookup)
                 if requirement:
                     st.caption(f"Requires: {requirement}")
-                growth_note = growth_caption(choice, class_growth_lookup)
-                if growth_note:
-                    st.caption(growth_note)
+                with st.expander("📈 Growth-rate modifiers"):
+                    render_growth_rate_mini_chart(
+                        choice, class_growth_lookup, key=f"growth_mini_{character}_{role_used}_{step['tier']}",
+                    )
     return selected
 
 
@@ -314,7 +404,20 @@ def render_stat_charts(
     )
 
 
-def render_team(team: list[dict], dlc_names: set[str]):
+def render_team(
+    team: list[dict], dlc_names: set[str], house_lookup: dict | None = None, dancer: str | None = None,
+):
+    """
+    dancer: the character name (if any) assigned this team's single Dancer
+    slot (see render_team_tab's Dancer selectbox / DANCER_INELIGIBLE_
+    CHARACTERS) - shown as a badge on that one member's card, rather than
+    Dancer being a class any/every member could be independently
+    recommended into. Only one character can hold the Dancer class per
+    playthrough (data/class_eligibility.csv's Dancer unlock_note), so this
+    is deliberately a single roster-wide assignment, not a per-member
+    option - the selectbox that produces this value in render_team_tab can
+    only ever hold one name at a time.
+    """
     st.subheader(f"Recommended Team ({len(team)})")
 
     role_counts = pd.Series([m["role"] for m in team]).value_counts()
@@ -328,10 +431,14 @@ def render_team(team: list[dict], dlc_names: set[str]):
         with st.container(border=True):
             col1, col2, col3 = st.columns([1, 1, 3])
             with col1:
-                render_portrait(member["character"])
+                render_portrait(member["character"], house=(house_lookup or {}).get(member["character"]))
             with col2:
                 st.markdown(f"**{display_name(member['character'], dlc_names)}**")
                 st.caption(f"{member['role']} (score {member['score']})")
+                if member["character"] == dancer:
+                    st.caption("💃 This team's Dancer (White Heron Cup) - swaps in instead of the path "
+                               "at right when you need the Dance command; only one character on the "
+                               "whole roster can hold it.")
             with col3:
                 st.write(path_str)
                 requirements = [step["requirement"] for step in member["path"] if step.get("requirement")]
@@ -445,7 +552,7 @@ def render_class_explorer_tab(stat_boosts_df: pd.DataFrame, weapon_req_df: pd.Da
 
 def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
                           weapon_req_df, character_weapon_talent_df, starting_level_df, class_growth_df,
-                          playable_names, dlc_names):
+                          class_base_stats_df, character_relics_df, playable_names, dlc_names):
     st.caption(
         "Pick a character and see a recommended class path - either toward their "
         "natural strengths, or a role you choose. Only classes that character can "
@@ -482,13 +589,17 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
         eligibility_df=eligibility_df, character_gender_df=character_gender_df,
         weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
         starting_level_df=starting_level_df, include_dlc_classes=include_dlc_classes,
-        class_growth_df=class_growth_df,
+        class_growth_df=class_growth_df, class_base_stats_df=class_base_stats_df,
+        character_relics_df=character_relics_df,
     )
     class_growth_lookup = load_class_growth_lookup(class_growth_df)
+    class_base_stats_lookup = load_class_base_stats_lookup(class_base_stats_df)
 
     col_portrait, col_info = st.columns([1, 5])
     with col_portrait:
-        render_portrait(character, width=80)
+        character_house = base_stats_df.loc[base_stats_df["name"] == character, "house"].iloc[0] \
+            if (base_stats_df["name"] == character).any() else None
+        render_portrait(character, house=character_house, width=80)
     with col_info:
         if role_name is None:
             st.info(
@@ -535,32 +646,48 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
 
     st.divider()
     effective_level = result["expected_stats_at_level"]
-    if final_class == result["path"][-1]["class"]:
-        final_stats = result["expected_final_stats"]
-    else:
-        final_stats = stats_for_class_at_level(
-            character, final_class, base_stats_df, growth_rates_df, stat_boosts_df,
-            effective_level, start_level=result["join_level"],
-            class_growth_lookup=class_growth_lookup,
-        )
+    # Always recomputed from the FULL actually-selected path (every tier,
+    # not just the final one) - see stats_for_selected_path. A class
+    # base-stat floor (see load_class_base_stats_lookup) can apply at any
+    # tier, not just the last, so an earlier-tier mix-and-match override
+    # can change the final numbers now, not just the path's flavor text -
+    # this is what makes the projected-stats chart re-render on ANY tier
+    # change, not only when the final tier itself was touched.
+    selected_steps = [
+        {"tier": step["tier"], "class": choice}
+        for step, choice in zip(result["path"], selected_path)
+    ]
+    final_stats = stats_for_selected_path(
+        character, selected_steps, base_stats_df, growth_rates_df, stat_boosts_df,
+        effective_level, start_level=result["join_level"],
+        class_growth_lookup=class_growth_lookup, class_base_stats_lookup=class_base_stats_lookup,
+    )
     base_level_label = f"Join Level {result['join_level']}" if result["join_level"] > 1 else "Level 1"
     render_stat_charts(
         result["base_stats_at_join_level"], final_stats, character, final_class,
         base_level_label=base_level_label,
     )
 
+    character_proficiency = load_character_proficiency_lookup(character_weapon_talent_df).get(character)
+
     st.button(
         "📥 Import this build into Team Builder", key=f"import_{character}",
         help="Locks in this exact class path/stats for the Team Builder tab, instead of it "
              "recomputing a recommendation for this character from scratch.",
         on_click=_import_build,
-        args=(character, result, selected_path, final_class, final_stats),
+        args=(
+            character, result, selected_path, final_class, final_stats,
+            stat_boosts_df, role_weights, weapon_req_lookup, character_proficiency,
+        ),
     )
     if character in st.session_state.get("imported_builds", {}):
         st.caption(f"✅ Imported - {character} will use this exact build in the Team Builder tab.")
 
 
-def _import_build(character, result, selected_path, final_class, final_stats):
+def _import_build(
+    character, result, selected_path, final_class, final_stats,
+    stat_boosts_df, role_weights, weapon_req_lookup, character_proficiency,
+):
     """
     Callback for the "Import this build into Team Builder" button - stashes
     this character's currently-selected path/stats (including any mix-and-
@@ -571,19 +698,61 @@ def _import_build(character, result, selected_path, final_class, final_stats):
     import happens before the rerun that follows the click, the standard
     Streamlit pattern for "this button press should affect what the rest of
     the app renders on the very next run."
+
+    Every tier is rebuilt from the ACTUALLY-selected class (selected_path),
+    not just copied from the tool's own recommendation (result["path"]) -
+    this is what makes an earlier-tier override survive being imported at
+    all (the original "imported build isn't the same as when it was
+    imported" bug: importing only ever rewrote the final tier). But it's
+    not enough to just swap in the new class name and leave every other
+    field alone, either - "requirement", "score", and "weapon_switch_warning"
+    are each specific to WHICH class occupies that tier and, for the
+    warning, which skills were accumulated by that point in the ACTUAL
+    selected path - so all three are recomputed here from the real
+    selection, tier by tier, in order (accumulated_skills threaded forward
+    exactly like recommend_path does). Leaving them copied from the
+    original recommendation was the "now correctly imports changed classes
+    but displays wrong final class requirements" bug: the class name
+    updated, but its requirement/score/warning silently kept referring to
+    whatever class the tool had originally recommended for that tier.
     """
-    # Rewrite EVERY tier where the user's mix-and-match selection differs
-    # from the tool's own recommendation, not just the final/deepest one -
-    # only the final tier's class feeds the stat projection in-game (see
-    # render_path_with_mixmatch), but the Team Builder tab still displays
-    # the whole path, so importing only the last override left every
-    # earlier-tier override silently reverted back to the recommendation
-    # the instant it was imported (the reported "imported build isn't the
-    # same as when it was imported" bug).
-    path = [
-        {**step, "class": choice, "is_unique_class": False} if choice != step["class"] else step
-        for step, choice in zip(result["path"], selected_path)
-    ]
+    accumulated_skills = set(character_proficiency or [])
+    path = []
+    for step, choice in zip(result["path"], selected_path):
+        if choice == step["class"]:
+            # Unchanged from the recommendation - class/requirement/why/
+            # is_unique_class stay as originally computed, but the warning
+            # is still recomputed against accumulated_skills-so-far, since
+            # an EARLIER tier's override can change what's "accumulated"
+            # even when this tier's own pick didn't change.
+            new_step = {
+                **step,
+                "weapon_switch_warning": weapon_switch_penalty(
+                    choice, weapon_req_lookup, accumulated_skills, character_proficiency,
+                ) > 0,
+            }
+        else:
+            choice_row = stat_boosts_df[stat_boosts_df["name"] == choice]
+            score = (
+                round(float(score_class_for_role(choice_row.iloc[0], role_weights)), 2)
+                if not choice_row.empty else None
+            )
+            new_step = {
+                "tier": step["tier"],
+                "class": choice,
+                "score": score,
+                "why": "Your pick - overrides the recommendation.",
+                "requirement": format_requirement(choice, weapon_req_lookup),
+                "is_unique_class": False,
+                "weapon_switch_warning": weapon_switch_penalty(
+                    choice, weapon_req_lookup, accumulated_skills, character_proficiency,
+                ) > 0,
+            }
+        path.append(new_step)
+        info = weapon_req_lookup.get(choice) if weapon_req_lookup else None
+        if info:
+            accumulated_skills |= {skill for skill, _ in info["requirements"]}
+
     imported = st.session_state.setdefault("imported_builds", {})
     imported[character] = {
         "path": path,
@@ -595,7 +764,7 @@ def _import_build(character, result, selected_path, final_class, final_stats):
 
 def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
                      weapon_req_df, character_weapon_talent_df, recruitment_requirements_df, starting_level_df,
-                     class_growth_df, playable_names, dlc_names):
+                     class_growth_df, class_base_stats_df, character_relics_df, playable_names, dlc_names):
     st.caption(
         "Builds a balanced team from a candidate pool by covering complementary "
         "roles, rather than just stacking the strongest individuals."
@@ -725,6 +894,8 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
             weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
             starting_level_df=starting_level_df, include_dlc_classes=include_dlc_classes,
             locked_builds=imported_builds, class_growth_df=class_growth_df,
+            class_base_stats_df=class_base_stats_df,
+            character_relics_df=character_relics_df,
             force_deployed=set(mandatory),
         )
         # Persisted in session_state rather than only a local variable: Streamlit reruns this whole
@@ -745,14 +916,37 @@ def render_team_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibility_
             requested_size = st.session_state.get("team_result_requested_size", team_size)
             if len(team) < requested_size:
                 st.caption(f"Only {len(team)} candidates were available in this pool.")
-            render_team(team, dlc_names)
+
+            dancer_options = ["None"] + [
+                m["character"] for m in team if m["character"] not in DANCER_INELIGIBLE_CHARACTERS
+            ]
+            # Keying on this exact team's composition (rather than a fixed
+            # key) means a newly-built team with a different roster always
+            # starts this widget fresh at "None" instead of inheriting a
+            # stale selection from a previous team that might not even
+            # contain that character anymore - see DANCER_INELIGIBLE_
+            # CHARACTERS docstring for why Dancer is single-select at all.
+            dancer_widget_key = "team_dancer_select_" + ",".join(sorted(m["character"] for m in team))
+            dancer_choice = st.selectbox(
+                "💃 Assign this team's Dancer (optional)",
+                options=dancer_options, key=dancer_widget_key,
+                format_func=lambda n: display_name(n, dlc_names) if n != "None" else "None",
+                help="Only one character can hold the Dancer class per playthrough - it's unlocked via "
+                     "the White Heron Cup event, not a certification exam, and equipping it replaces "
+                     "whichever class that character is currently in rather than stacking with it. So "
+                     "this is a single roster-wide slot, not something every team member can be "
+                     "independently recommended into (the Protagonist can't hold it either).",
+            )
+            dancer = dancer_choice if dancer_choice != "None" else None
+
+            render_team(team, dlc_names, house_lookup=get_house_lookup(base_stats_df), dancer=dancer)
 
 
 def main():
     (
         base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
         weapon_req_df, character_weapon_talent_df, recruitment_requirements_df, starting_level_df,
-        class_growth_df,
+        class_growth_df, class_base_stats_df, character_relics_df,
     ) = load_data()
     playable_names = get_playable_names(base_stats_df)
     dlc_names = get_dlc_names(base_stats_df)
@@ -764,13 +958,13 @@ def main():
         render_character_tab(
             base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
             weapon_req_df, character_weapon_talent_df, starting_level_df, class_growth_df,
-            playable_names, dlc_names,
+            class_base_stats_df, character_relics_df, playable_names, dlc_names,
         )
     with tab2:
         render_team_tab(
             base_stats_df, growth_rates_df, stat_boosts_df, eligibility_df, character_gender_df,
             weapon_req_df, character_weapon_talent_df, recruitment_requirements_df, starting_level_df,
-            class_growth_df, playable_names, dlc_names,
+            class_growth_df, class_base_stats_df, character_relics_df, playable_names, dlc_names,
         )
     with tab3:
         render_class_explorer_tab(stat_boosts_df, weapon_req_df, class_growth_df)

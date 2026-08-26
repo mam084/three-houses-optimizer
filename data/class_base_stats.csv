@@ -1,0 +1,53 @@
+name,HP,Str,Mag,Dex,Spd,Lck,Def,Res,Cha,Mov,tier
+Noble,0,0,0,0,0,0,0,0,0,4,Unique
+Commoner,0,0,0,0,0,0,0,0,0,4,Unique
+Dancer,0,0,0,0,0,0,0,0,0,6,Unique
+Enlightened One,28,17,8,12,14,10,12,10,0,6,Unique
+Armored Lord,38,17,8,12,6,10,17,8,0,5,Unique
+High Lord,30,16,7,11,13,9,13,9,0,5,Unique
+Wyvern Master,30,17,9,13,19,11,14,11,0,7,Unique
+Emperor,38,17,8,12,6,10,17,8,0,5,Unique
+Great Lord,35,17,8,12,14,10,14,10,0,6,Unique
+Barbarossa,35,18,10,14,20,12,15,12,0,8,Unique
+Myrmidon,20,7,3,6,6,4,5,2,0,4,Beginner
+Soldier,20,8,3,6,6,4,5,2,0,4,Beginner
+Fighter,20,8,3,6,6,4,5,2,0,4,Beginner
+Monk,20,4,8,6,6,4,3,4,0,4,Beginner
+Lord,25,9,6,10,10,8,6,3,0,5,Intermediate
+Mercenary,25,9,6,10,10,8,6,2,0,5,Intermediate
+Thief,25,9,6,11,11,8,6,2,0,5,Intermediate
+Armored Knight,30,9,6,7,4,8,12,1,0,4,Intermediate
+Cavalier,25,9,6,7,6,8,6,2,0,7,Intermediate
+Brigand,28,10,6,7,7,8,6,2,0,5,Intermediate
+Archer,25,8,6,8,7,8,5,2,0,5,Intermediate
+Brawler,28,9,6,7,8,8,6,1,0,5,Intermediate
+Mage,25,4,10,7,6,8,3,5,0,4,Intermediate
+Dark Mage,25,4,10,7,6,8,3,5,0,4,Intermediate
+Priest,25,4,9,7,6,8,3,5,0,4,Intermediate
+Pegasus Knight,25,8,6,7,8,8,5,4,0,6,Intermediate
+Hero,30,17,8,12,14,10,12,8,0,5,Advanced
+Swordmaster,30,17,8,12,14,10,12,8,0,5,Advanced
+Assassin,30,17,8,12,14,10,12,8,0,6,Advanced
+Fortress Knight,35,17,8,12,8,10,17,7,0,4,Advanced
+Paladin,32,17,8,12,14,10,12,8,0,8,Advanced
+Wyvern Rider,30,18,8,12,14,10,12,8,0,7,Advanced
+Warrior,32,19,8,12,14,10,13,8,0,5,Advanced
+Sniper,30,17,8,12,14,10,12,8,0,5,Advanced
+Grappler,32,17,8,12,14,10,14,7,0,6,Advanced
+Warlock,30,8,17,12,14,10,12,15,0,4,Advanced
+Dark Bishop,30,8,17,12,14,10,12,15,0,4,Advanced
+Bishop,30,8,15,12,14,10,12,15,0,4,Advanced
+Falcon Knight,32,18,10,14,20,12,13,14,0,8,Master
+Wyvern Lord,32,18,10,14,20,12,15,12,0,8,Master
+Mortal Savant,32,17,17,14,16,12,14,12,0,6,Master
+Great Knight,34,18,10,14,10,12,17,10,0,7,Master
+Bow Knight,32,17,10,14,16,12,14,10,0,8,Master
+Dark Knight,32,10,17,14,16,12,13,15,0,7,Master
+Holy Knight,32,8,15,14,16,12,13,16,0,7,Master
+War Master,33,20,10,14,16,12,15,10,0,6,Master
+Gremory,32,8,17,14,16,12,13,16,0,5,Master
+Trickster,28,14,12,10,14,12,10,10,0,5,DLC Exclusive
+War Monk/Cleric,32,17,10,10,10,10,14,11,0,6,DLC Exclusive
+Dark Flier,25,8,6,7,8,8,5,4,0,7,DLC Exclusive
+Valkyrie,20,5,10,10,9,9,9,13,0,6,DLC Exclusive
+Death Knight,32,10,17,14,16,12,13,15,0,7,DLC Exclusive

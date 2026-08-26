@@ -23,6 +23,8 @@ import pandas as pd
 from src.optimizer import (
     DLC_CLASS_MERGE_TIER,
     DLC_CLASS_TIER,
+    NO_CERTIFICATION_CLASSES,
+    RELIC_AFFINITY_BONUS,
     ROLE_PROFILES,
     STAT_COLS,
     TIER_LEVEL_REQUIREMENTS,
@@ -30,6 +32,7 @@ from src.optimizer import (
     UNIQUE_CLASS_SCORE_BONUS,
     UNIQUE_STORY_CLASS_TIER,
     WEAPON_SWITCH_PENALTY,
+    apply_class_base_stat_floor,
     apply_weapon_affinity_fallback,
     base_stats_at_join_level,
     compute_roster_stat_stats,
@@ -40,6 +43,8 @@ from src.optimizer import (
     is_class_eligible,
     list_eligible_classes_at_tier,
     load_character_proficiency_lookup,
+    load_character_relic_lookup,
+    load_class_base_stats_lookup,
     load_class_growth_lookup,
     load_eligibility_lookup,
     load_starting_level_lookup,
@@ -48,9 +53,11 @@ from src.optimizer import (
     reachable_tiers,
     recommend_for_character,
     recommend_path,
+    relic_affinity_bonus,
     restrict_support_to_magic_classes,
     score_growth_for_role,
     stats_for_class_at_level,
+    stats_for_selected_path,
     weapon_growth_bonus,
     weapon_switch_penalty,
 )
@@ -74,11 +81,15 @@ PLAYABLE_NAMES = sorted(n for n in BASE_STATS_DF["name"] if "(NPC)" not in n)
 
 STARTING_LEVEL_DF = pd.read_csv(DATA_DIR / "character_starting_level.csv")
 CLASS_GROWTH_DF = pd.read_csv(DATA_DIR / "class_growth_rates.csv")
+CLASS_BASE_STATS_DF = pd.read_csv(DATA_DIR / "class_base_stats.csv")
+CHARACTER_RELICS_DF = pd.read_csv(DATA_DIR / "character_relics.csv")
 WEAPON_REQ_LOOKUP = load_weapon_requirements_lookup(WEAPON_REQ_DF)
 PROFICIENCY_LOOKUP = load_character_proficiency_lookup(CHARACTER_WEAPON_TALENT_DF)
 ELIGIBILITY_LOOKUP = load_eligibility_lookup(ELIGIBILITY_DF)
 STARTING_LEVEL_LOOKUP = load_starting_level_lookup(STARTING_LEVEL_DF)
 CLASS_GROWTH_LOOKUP = load_class_growth_lookup(CLASS_GROWTH_DF)
+CLASS_BASE_STATS_LOOKUP = load_class_base_stats_lookup(CLASS_BASE_STATS_DF)
+CHARACTER_RELIC_LOOKUP = load_character_relic_lookup(CHARACTER_RELICS_DF)
 ROSTER_MEANS, ROSTER_STDS = compute_roster_stat_stats(GROWTH_RATES_DF)
 
 
@@ -152,6 +163,35 @@ class TestWeaponRequirements(unittest.TestCase):
 
     def test_format_requirement_unknown_class_returns_none(self):
         self.assertIsNone(format_requirement("Emperor", WEAPON_REQ_LOOKUP))  # Unique tier, no cert exam
+
+    def test_no_certification_classes_never_show_a_requirement(self):
+        # Item 4 audit: none of the eleven story/starting classes that
+        # class_eligibility.csv itself documents as reached WITHOUT a
+        # certification exam should ever surface a requirement line -
+        # "Enlightened One says it has a requirement of A rank swords" was
+        # the reported symptom; "Lord" (a stray row in
+        # class_weapon_requirements.csv, since removed) was a confirmed
+        # live instance of the same bug.
+        for class_name in NO_CERTIFICATION_CLASSES:
+            self.assertIsNone(
+                format_requirement(class_name, WEAPON_REQ_LOOKUP),
+                f"{class_name} should never show a certification requirement",
+            )
+
+    def test_load_weapon_requirements_lookup_ignores_stray_rows_for_no_cert_classes(self):
+        # Even if class_weapon_requirements.csv regains a stray row for one
+        # of these (as "Lord" once had), the loader must still drop it -
+        # this is the actual regression guard, independent of what the
+        # checked-in CSV currently contains.
+        stray_df = pd.DataFrame([
+            {"class_name": "Lord", "tier": "Intermediate", "weapon_category": "physical",
+             "requirement_type": "AND", "requirements": "Sword:D+|Authority:C"},
+            {"class_name": "Fighter", "tier": "Beginner", "weapon_category": "physical",
+             "requirement_type": "OR", "requirements": "Axe:D|Bow:D|Brawling:D"},
+        ])
+        lookup = load_weapon_requirements_lookup(stray_df)
+        self.assertNotIn("Lord", lookup)
+        self.assertIn("Fighter", lookup)
 
     def test_every_character_has_proficiency_data(self):
         for name in PLAYABLE_NAMES:
@@ -305,6 +345,8 @@ class TestFullRosterSweep(unittest.TestCase):
                             eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
                             weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
                             starting_level_df=STARTING_LEVEL_DF, include_dlc_classes=include_dlc_classes,
+                            class_growth_df=CLASS_GROWTH_DF, class_base_stats_df=CLASS_BASE_STATS_DF,
+                            character_relics_df=CHARACTER_RELICS_DF,
                         )
                         self.assertIsInstance(result["path"], list)
 
@@ -424,6 +466,95 @@ class TestWeaponGrowthBonus(unittest.TestCase):
 
     def test_no_bonus_for_unknown_class(self):
         self.assertEqual(weapon_growth_bonus("Not A Real Class", WEAPON_REQ_LOOKUP, {"Sword"}), 0.0)
+
+
+class TestLoadCharacterRelicLookup(unittest.TestCase):
+    def test_protagonist_wields_sword_of_the_creator(self):
+        self.assertEqual(CHARACTER_RELIC_LOOKUP["Protagonist"], {"Sword"})
+
+    def test_lysithea_has_two_relics_across_two_weapon_types(self):
+        # Lysithea bears two minor crests (Charon and Gloucester) and has a
+        # relic for each - Thunderbrand (Sword) and Thyrsus (Reason) - so
+        # her entry should union both weapon types, not just the last row
+        # read from the CSV.
+        self.assertEqual(CHARACTER_RELIC_LOOKUP["Lysithea"], {"Sword", "Reason"})
+
+    def test_character_with_no_relic_is_absent_from_the_lookup(self):
+        self.assertNotIn("Bernadetta", CHARACTER_RELIC_LOOKUP)
+
+    def test_returns_empty_dict_for_none(self):
+        self.assertEqual(load_character_relic_lookup(None), {})
+
+
+class TestRelicAffinityBonus(unittest.TestCase):
+    def test_bonus_when_class_certification_uses_the_relic_weapon_type(self):
+        # The Protagonist's Sword of the Creator is a Sword relic - Myrmidon
+        # certifies on Sword, so it should get the bonus.
+        bonus = relic_affinity_bonus("Myrmidon", WEAPON_REQ_LOOKUP, CHARACTER_RELIC_LOOKUP["Protagonist"])
+        self.assertEqual(bonus, RELIC_AFFINITY_BONUS)
+
+    def test_no_bonus_when_no_overlap(self):
+        # Monk certifies on Reason/Faith, not Sword.
+        bonus = relic_affinity_bonus("Monk", WEAPON_REQ_LOOKUP, CHARACTER_RELIC_LOOKUP["Protagonist"])
+        self.assertEqual(bonus, 0.0)
+
+    def test_no_bonus_without_relic_data(self):
+        self.assertEqual(relic_affinity_bonus("Myrmidon", WEAPON_REQ_LOOKUP, None), 0.0)
+
+    def test_no_bonus_for_character_with_no_relic(self):
+        self.assertEqual(
+            relic_affinity_bonus("Myrmidon", WEAPON_REQ_LOOKUP, CHARACTER_RELIC_LOOKUP.get("Bernadetta")), 0.0,
+        )
+
+    def test_no_bonus_for_unknown_class(self):
+        self.assertEqual(relic_affinity_bonus("Not A Real Class", WEAPON_REQ_LOOKUP, {"Sword"}), 0.0)
+
+
+class TestRelicAffinityFeedsIntoScoring(unittest.TestCase):
+    """
+    Integration-level: a relic-bearing character's own Hero's Relic weapon
+    type should be able to move recommend_path's pick, the same way
+    weapon_growth_bonus already does for starting proficiency - not just
+    exercise relic_affinity_bonus in isolation.
+    """
+
+    def test_recommend_path_prefers_the_relic_weapon_type_in_a_tied_role_matchup(self):
+        # Two single-row "classes" tied on every stat the role cares about,
+        # differing only in their weapon certification - Sword vs. Reason.
+        # Without a relic, score_class_for_role ties them (order/whichever
+        # pandas idxmax picks first is not something to pin down); with a
+        # Sword relic, the Sword option should win outright.
+        tier_rows = pd.DataFrame([
+            {"name": "Sword Option", "tier": "Beginner", "HP": 5, "Str": 5, "Mag": 0,
+             "Dex": 5, "Spd": 5, "Lck": 5, "Def": 5, "Res": 0, "Cha": 5, "Mov": 4},
+            {"name": "Reason Option", "tier": "Beginner", "HP": 5, "Str": 5, "Mag": 0,
+             "Dex": 5, "Spd": 5, "Lck": 5, "Def": 5, "Res": 0, "Cha": 5, "Mov": 4},
+        ])
+        weapon_req_lookup = {
+            "Sword Option": {"weapon_category": "physical", "requirement_type": "AND", "requirements": [("Sword", "D")]},
+            "Reason Option": {"weapon_category": "magic", "requirement_type": "AND", "requirements": [("Reason", "D")]},
+        }
+        path = recommend_path(
+            tier_rows, "Physical Attacker", tiers=["Beginner"],
+            weapon_req_lookup=weapon_req_lookup,
+            character_relic_weapon_types={"Sword"},
+        )
+        self.assertEqual(path[0]["class"], "Sword Option")
+
+    def test_recommend_for_character_accepts_character_relics_df_without_raising(self):
+        # Full-pipeline smoke check for a relic-bearing character - the
+        # detailed scoring effect is covered by the tied-matchup test above;
+        # this just confirms the plumbing (recommend_for_character ->
+        # recommend_path -> score_row) doesn't break for real data.
+        result = recommend_for_character(
+            "Claude", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Physical Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            starting_level_df=STARTING_LEVEL_DF, class_growth_df=CLASS_GROWTH_DF,
+            class_base_stats_df=CLASS_BASE_STATS_DF, character_relics_df=CHARACTER_RELICS_DF,
+        )
+        self.assertIsInstance(result["path"], list)
 
 
 class TestJoinLevel(unittest.TestCase):
@@ -638,6 +769,151 @@ class TestExpectedStatsAlongPath(unittest.TestCase):
         )
         self.assertEqual(set(stats.keys()), set(STAT_COLS))
 
+    def test_class_base_stat_floor_snaps_up_at_each_tier_before_that_tiers_growth(self):
+        # Item 6: a class base-stat floor applies at the MOMENT of
+        # certifying into each tier - before that tier's own growth is
+        # simulated, not stacked on top of it - and it applies at EVERY
+        # tier along the path, not just the final one. Hand-computed
+        # exactly: a character with every stat at 1 and zero personal
+        # growth, walking Fighter (Beginner, HP base 20, HP growth +10%)
+        # -> Brigand (Intermediate, HP base 28, HP growth +30%), levels
+        # 1->15 (pre-band 4 levels, Fighter band 5-10, Brigand band 10-15).
+        zero_growth = pd.Series({s: 0 for s in STAT_COLS})
+        zero_boost = pd.Series({s: 0 for s in STAT_COLS})
+        low_base = pd.Series({s: 1 for s in STAT_COLS})
+        path = [{"tier": "Beginner", "class": "Fighter"}, {"tier": "Intermediate", "class": "Brigand"}]
+
+        floored = expected_stats_along_path(
+            path, low_base, zero_growth, zero_boost, CLASS_GROWTH_LOOKUP, target_level=15, start_level=1,
+            class_base_stats_lookup=CLASS_BASE_STATS_LOOKUP,
+        )
+        # 1 (pre-band, 4 levels @ 0%) -> floor to Fighter's HP base (20) ->
+        # +5 levels @ Fighter's 10% HP growth (+0.5) = 20.5 -> floor to
+        # Brigand's HP base (28, higher than 20.5) -> +5 levels @
+        # Brigand's 30% HP growth (+1.5) = 29.5.
+        self.assertEqual(floored["HP"], 29.5)
+
+        unfloored = expected_stats_along_path(
+            path, low_base, zero_growth, zero_boost, CLASS_GROWTH_LOOKUP, target_level=15, start_level=1,
+        )
+        # Without the floor: 1 + 5*0.10 + 5*0.30 = 3.0 - confirms the gap
+        # is entirely the floor's doing, not a side effect of the growth math.
+        self.assertEqual(unfloored["HP"], 3.0)
+
+    def test_class_base_stat_floor_is_a_ceiling_free_no_op_when_already_higher(self):
+        # A stat already ABOVE every relevant class's base is untouched -
+        # the floor never subtracts, and never adds on top either (it's a
+        # floor, not a bonus).
+        zero_growth = pd.Series({s: 0 for s in STAT_COLS})
+        zero_boost = pd.Series({s: 0 for s in STAT_COLS})
+        high_base = pd.Series({s: 100 for s in STAT_COLS})
+        path = [{"tier": "Beginner", "class": "Fighter"}, {"tier": "Intermediate", "class": "Brigand"}]
+
+        floored = expected_stats_along_path(
+            path, high_base, zero_growth, zero_boost, CLASS_GROWTH_LOOKUP, target_level=15, start_level=1,
+            class_base_stats_lookup=CLASS_BASE_STATS_LOOKUP,
+        )
+        unfloored = expected_stats_along_path(
+            path, high_base, zero_growth, zero_boost, CLASS_GROWTH_LOOKUP, target_level=15, start_level=1,
+        )
+        self.assertEqual(floored, unfloored)
+
+
+class TestApplyClassBaseStatFloor(unittest.TestCase):
+    def test_snaps_up_when_below(self):
+        self.assertEqual(
+            apply_class_base_stat_floor(5, "Warrior", "HP", CLASS_BASE_STATS_LOOKUP),
+            float(CLASS_BASE_STATS_LOOKUP["Warrior"]["HP"]),
+        )
+
+    def test_leaves_higher_value_unchanged(self):
+        self.assertEqual(apply_class_base_stat_floor(500, "Warrior", "HP", CLASS_BASE_STATS_LOOKUP), 500)
+
+    def test_missing_lookup_is_a_no_op(self):
+        self.assertEqual(apply_class_base_stat_floor(5, "Warrior", "HP", None), 5)
+        self.assertEqual(apply_class_base_stat_floor(5, "Warrior", "HP", {}), 5)
+
+    def test_missing_class_is_a_no_op(self):
+        self.assertEqual(apply_class_base_stat_floor(5, "Not A Real Class", "HP", CLASS_BASE_STATS_LOOKUP), 5)
+
+
+class TestLoadClassBaseStatsLookup(unittest.TestCase):
+    def test_returns_empty_dict_for_none(self):
+        self.assertEqual(load_class_base_stats_lookup(None), {})
+
+    def test_covers_the_same_real_classes_as_class_growth_rates(self):
+        # data/class_base_stats.csv should mirror data/class_growth_rates.csv's
+        # own class list exactly - both describe the same "real, certifiable
+        # or story-unlocked classes" set (no NPC/Enemy rows, no
+        # story/enemy-variant rows like "Lord (Judith)").
+        self.assertEqual(set(CLASS_BASE_STATS_LOOKUP.keys()), set(CLASS_GROWTH_LOOKUP.keys()))
+
+
+class TestStatsForSelectedPath(unittest.TestCase):
+    def test_matches_recommend_for_character_when_selection_equals_recommendation(self):
+        result = recommend_for_character(
+            "Bernadetta", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Physical Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            class_growth_df=CLASS_GROWTH_DF, class_base_stats_df=CLASS_BASE_STATS_DF,
+        )
+        selected_steps = [{"tier": s["tier"], "class": s["class"]} for s in result["path"]]
+        recomputed = stats_for_selected_path(
+            "Bernadetta", selected_steps, BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            target_level=result["expected_stats_at_level"], start_level=result["join_level"],
+            class_growth_lookup=CLASS_GROWTH_LOOKUP, class_base_stats_lookup=CLASS_BASE_STATS_LOOKUP,
+        )
+        self.assertEqual(recomputed, result["expected_final_stats"])
+
+    def test_overriding_a_non_final_tier_can_change_the_final_projection(self):
+        # Item 1 regression guard: before round 5, only the final tier's
+        # class affected the projected stats. With the per-tier floor,
+        # swapping an EARLIER tier's class can change the numbers too -
+        # the whole reason the projected-stats chart now needs to
+        # re-render on any tier change, not just the final one.
+        result = recommend_for_character(
+            "Bernadetta", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            role_name="Physical Attacker", target_level=30,
+            eligibility_df=ELIGIBILITY_DF, character_gender_df=CHARACTER_GENDER_DF,
+            weapon_req_df=WEAPON_REQ_DF, character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+            class_growth_df=CLASS_GROWTH_DF, class_base_stats_df=CLASS_BASE_STATS_DF,
+        )
+        original_steps = [{"tier": s["tier"], "class": s["class"]} for s in result["path"]]
+        # Override the FIRST tier only, to whichever Beginner class isn't
+        # already the recommendation (their base stats differ enough from
+        # each other - e.g. Monk's Mag/Res-leaning line vs. Myrmidon/
+        # Soldier/Fighter's Str-leaning ones - to move the floor) while
+        # leaving every later tier (including the final one) alone.
+        overridden_steps = [dict(s) for s in original_steps]
+        alternative = next(
+            c for c in ["Myrmidon", "Soldier", "Fighter", "Monk"] if c != overridden_steps[0]["class"]
+        )
+        overridden_steps[0]["class"] = alternative
+
+        original_stats = stats_for_selected_path(
+            "Bernadetta", original_steps, BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            target_level=result["expected_stats_at_level"], start_level=result["join_level"],
+            class_growth_lookup=CLASS_GROWTH_LOOKUP, class_base_stats_lookup=CLASS_BASE_STATS_LOOKUP,
+        )
+        overridden_stats = stats_for_selected_path(
+            "Bernadetta", overridden_steps, BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+            target_level=result["expected_stats_at_level"], start_level=result["join_level"],
+            class_growth_lookup=CLASS_GROWTH_LOOKUP, class_base_stats_lookup=CLASS_BASE_STATS_LOOKUP,
+        )
+        self.assertNotEqual(original_stats, overridden_stats)
+
+    def test_returns_none_for_empty_selection(self):
+        self.assertIsNone(stats_for_selected_path(
+            "Bernadetta", [], BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+        ))
+
+    def test_returns_none_for_unknown_final_class(self):
+        self.assertIsNone(stats_for_selected_path(
+            "Bernadetta", [{"tier": "Beginner", "class": "Not A Real Class"}],
+            BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
+        ))
+
 
 class TestWeaponSwitchPenalty(unittest.TestCase):
     def test_or_requirement_is_satisfied_by_any_one_known_skill(self):
@@ -668,6 +944,48 @@ class TestWeaponSwitchPenalty(unittest.TestCase):
         self.assertEqual(
             weapon_switch_penalty("Not A Real Class", WEAPON_REQ_LOOKUP, set(), None), 0.0,
         )
+
+    def test_low_rank_mount_requirement_never_flags(self):
+        # Item 5: Cavalier's Riding D is a low-rank mount requirement -
+        # never a flagged switch, even with zero prior riding practice at all.
+        penalty = weapon_switch_penalty(
+            "Cavalier", WEAPON_REQ_LOOKUP, accumulated_skills=set(), original_proficiency={"Lance"},
+        )
+        self.assertEqual(penalty, 0.0)
+
+    def test_high_rank_mount_requirement_flags_with_zero_related_practice(self):
+        # Great Knight's Heavy Armour A is a genuinely high-rank ask - with
+        # zero practice in ANY mount/armor skill (only Axe known), this
+        # should still flag, per "the warning should only fire for these
+        # categories on a jump to a high rank with zero prior practice."
+        penalty = weapon_switch_penalty(
+            "Great Knight", WEAPON_REQ_LOOKUP, accumulated_skills={"Axe"}, original_proficiency=None,
+        )
+        self.assertEqual(penalty, WEAPON_SWITCH_PENALTY)
+
+    def test_high_rank_mount_requirement_forgiven_by_related_mount_practice(self):
+        # Same Great Knight ask, but the character already has SOME
+        # mount/armor practice (Riding, from an earlier Cavalier/Paladin
+        # tier) even though they've never specifically trained Heavy
+        # Armour - that should be enough to excuse the high-rank ask,
+        # since mount and armor training are graded as one forgiving
+        # category, not skill-by-skill.
+        penalty = weapon_switch_penalty(
+            "Great Knight", WEAPON_REQ_LOOKUP, accumulated_skills={"Axe", "Riding"}, original_proficiency=None,
+        )
+        self.assertEqual(penalty, 0.0)
+
+    def test_ordinary_weapon_skills_are_unaffected_by_the_mount_armor_relaxation(self):
+        # Falcon Knight needs Sword C AND Lance A AND Flying A - even
+        # though Flying A (mount, high rank, zero related practice) would
+        # normally flag, Sword and Lance are ORDINARY weapon skills and
+        # still use the strict exact-skill rule - a character who's never
+        # touched Sword or Lance still gets flagged regardless of how
+        # Flying is scored.
+        penalty = weapon_switch_penalty(
+            "Falcon Knight", WEAPON_REQ_LOOKUP, accumulated_skills={"Riding"}, original_proficiency=None,
+        )
+        self.assertEqual(penalty, WEAPON_SWITCH_PENALTY)
 
     def test_catherine_swordmaster_to_wyvern_lord_flags_the_real_complaint(self):
         # The original report: "weapon requirements aren't weighted well -

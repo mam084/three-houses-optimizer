@@ -47,10 +47,17 @@ class TestAppSmoke(unittest.TestCase):
     def setUp(self):
         st.session_state.clear()
         st.WIDGET_OVERRIDES = {}
+        if hasattr(st, "MARKDOWN_CALLS"):
+            st.MARKDOWN_CALLS.clear()
+        if hasattr(st, "SELECTBOX_CALLS"):
+            st.SELECTBOX_CALLS.clear()
+        if hasattr(st, "CAPTION_CALLS"):
+            st.CAPTION_CALLS.clear()
         (
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
             self.recruitment_requirements_df, self.starting_level_df, self.class_growth_df,
+            self.class_base_stats_df, self.character_relics_df,
         ) = app.load_data()
         self.playable_names = app.get_playable_names(self.base_stats_df)
         self.dlc_names = app.get_dlc_names(self.base_stats_df)
@@ -59,7 +66,8 @@ class TestAppSmoke(unittest.TestCase):
         app.render_character_tab(
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
-            self.starting_level_df, self.class_growth_df, self.playable_names, self.dlc_names,
+            self.starting_level_df, self.class_growth_df, self.class_base_stats_df,
+            self.character_relics_df, self.playable_names, self.dlc_names,
         )
 
     def _render_team_tab(self):
@@ -67,12 +75,59 @@ class TestAppSmoke(unittest.TestCase):
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
             self.recruitment_requirements_df, self.starting_level_df, self.class_growth_df,
-            self.playable_names, self.dlc_names,
+            self.class_base_stats_df, self.character_relics_df, self.playable_names, self.dlc_names,
         )
 
     def test_character_tab_default_widgets(self):
         st.WIDGET_OVERRIDES = {"char_select": "Byleth" if "Byleth" in self.playable_names else self.playable_names[0]}
         self._render_character_tab()
+
+    def test_character_tab_portrait_is_color_coded_by_house(self):
+        # Item 8 (route-based color coding): the fallback portrait tile
+        # should be tinted per the character's own house/route (see
+        # app.HOUSE_COLORS), not a single flat neutral box for everyone.
+        if not hasattr(st, "MARKDOWN_CALLS"):
+            self.skipTest("stub-only assertion - MARKDOWN_CALLS isn't part of the real streamlit API")
+        st.WIDGET_OVERRIDES = {"char_select": "Bernadetta"}  # Black Eagles
+        self._render_character_tab()
+        portrait_html = next(html for html in st.MARKDOWN_CALLS if "div title=" in html)
+        self.assertIn(app.HOUSE_COLORS["Black Eagles"], portrait_html)
+        self.assertIn("Black Eagles", portrait_html)
+
+    def test_team_tab_portraits_are_color_coded_by_house(self):
+        if not hasattr(st, "MARKDOWN_CALLS"):
+            self.skipTest("stub-only assertion - MARKDOWN_CALLS isn't part of the real streamlit API")
+        st.WIDGET_OVERRIDES = {"team_route": "Blue Lions", "Build Team": True}
+        self._render_team_tab()
+        portrait_htmls = [html for html in st.MARKDOWN_CALLS if "div title=" in html]
+        self.assertTrue(portrait_htmls)
+        # Every team member on a Blue Lions build is either a Blue Lions
+        # student or Church/Knights of Seiros/Protagonist staff (see
+        # get_candidate_pool) - whichever house each one's tile reports,
+        # it should be a real, colored house, not the neutral fallback.
+        for html in portrait_htmls:
+            self.assertNotIn(app.DEFAULT_PORTRAIT_COLOR, html)
+
+    def test_character_tab_shows_growth_rate_mini_chart_for_every_tier(self):
+        # Item 8: growth-rate visualization on the Character Optimizer
+        # tab's own recommended-path view, not just the Class Explorer tab
+        # - and showing more than the old 2-stat text summary (all of
+        # STAT_COLS, per tier - see render_growth_rate_mini_chart).
+        if not hasattr(st, "PLOTLY_CALLS"):
+            self.skipTest("stub-only assertion - PLOTLY_CALLS isn't part of the real streamlit API")
+        st.WIDGET_OVERRIDES = {"char_select": "Bernadetta", "char_role_select": "Physical Attacker"}
+        st.PLOTLY_CALLS.clear()
+        self._render_character_tab()
+
+        growth_charts = [(key, fig) for key, fig in st.PLOTLY_CALLS if key.startswith("growth_mini_")]
+        self.assertTrue(growth_charts)
+        # Every mini chart shows all of STAT_COLS (more than the old 2-stat
+        # text caption), one bar trace, horizontal.
+        for _, fig in growth_charts:
+            self.assertEqual(len(fig.traces), 1)
+            trace = fig.traces[0]
+            self.assertEqual(list(trace.kwargs["y"]), app.STAT_COLS)
+            self.assertEqual(trace.kwargs["orientation"], "h")
 
     def test_character_tab_manual_role_and_mixmatch_override(self):
         st.WIDGET_OVERRIDES = {
@@ -81,6 +136,33 @@ class TestAppSmoke(unittest.TestCase):
             "mixmatch_Bernadetta_Magic Attacker_Beginner": "Fighter",
         }
         self._render_character_tab()
+
+    def test_character_tab_non_final_tier_override_changes_projected_stats_chart(self):
+        # Item 1 regression guard, exercised through the real render path
+        # (not just the optimizer function directly): overriding a
+        # NON-FINAL mix-and-match tier must change the projected-stats bar
+        # chart, not be silently ignored until the final tier also changes
+        # - the class base-stat floor (item 6) is what makes this true now.
+        if not hasattr(st, "PLOTLY_CALLS"):
+            self.skipTest("stub-only assertion - PLOTLY_CALLS isn't part of the real streamlit API")
+
+        st.WIDGET_OVERRIDES = {"char_select": "Bernadetta", "char_role_select": "Magic Attacker"}
+        st.PLOTLY_CALLS.clear()
+        self._render_character_tab()
+        baseline_fig = next(fig for key, fig in st.PLOTLY_CALLS if key.startswith("bar_"))
+        baseline_projected = next(t for t in baseline_fig.traces if t.kwargs["name"].startswith("Projected"))
+
+        st.session_state.clear()
+        st.WIDGET_OVERRIDES = {
+            "char_select": "Bernadetta", "char_role_select": "Magic Attacker",
+            "mixmatch_Bernadetta_Magic Attacker_Beginner": "Fighter",
+        }
+        st.PLOTLY_CALLS.clear()
+        self._render_character_tab()
+        overridden_fig = next(fig for key, fig in st.PLOTLY_CALLS if key.startswith("bar_"))
+        overridden_projected = next(t for t in overridden_fig.traces if t.kwargs["name"].startswith("Projected"))
+
+        self.assertNotEqual(baseline_projected.kwargs["y"], overridden_projected.kwargs["y"])
 
     def test_character_tab_every_playable_character(self):
         # Cheap insurance against a KeyError/IndexError that only fires for one specific character's data.
@@ -108,6 +190,28 @@ class TestAppSmoke(unittest.TestCase):
         self.assertIn("final_class", imported)
         self.assertIn("expected_final_stats", imported)
         self.assertIn("path", imported)
+
+    def test_character_tab_import_build_uses_overridden_tier_requirement(self):
+        # Regression test for the "now correctly imports changed classes
+        # but displays wrong final class requirements" bug (spec item B):
+        # overriding a tier's class via mix-and-match, then importing,
+        # must carry that class's OWN requirement/score/warning - not the
+        # ones cached from whichever class the tool originally recommended
+        # for that tier.
+        st.WIDGET_OVERRIDES = {
+            "char_select": "Bernadetta",
+            "char_role_select": "Magic Attacker",
+            "mixmatch_Bernadetta_Magic Attacker_Beginner": "Fighter",
+            "import_Bernadetta": True,
+        }
+        self._render_character_tab()
+        imported = st.session_state["imported_builds"]["Bernadetta"]
+        beginner_step = next(s for s in imported["path"] if s["tier"] == "Beginner")
+        self.assertEqual(beginner_step["class"], "Fighter")
+        # Fighter's real requirement, not Monk's (the Magic Attacker recommendation
+        # this tier's dropdown was overridden away from).
+        self.assertEqual(beginner_step["requirement"], "Axe D or Bow D or Brawling D")
+        self.assertFalse(beginner_step["is_unique_class"])
 
     def test_team_tab_build_then_survives_unrelated_rerun(self):
         st.WIDGET_OVERRIDES = {
@@ -139,6 +243,62 @@ class TestAppSmoke(unittest.TestCase):
         }
         self._render_team_tab()
         self.assertEqual(len(st.session_state["team_result"]), 8)
+
+    def test_team_tab_dancer_assignment_excludes_protagonist_and_is_single_select(self):
+        # Item 9: Dancer is a single roster-wide slot, not something every
+        # team member can be independently assigned - enforced here by (a)
+        # the Protagonist never appearing in the option list at all (see
+        # app.DANCER_INELIGIBLE_CHARACTERS) and (b) the control being one
+        # selectbox (options list, index-picks-one), never a multiselect.
+        st.WIDGET_OVERRIDES = {
+            "team_route": "Blue Lions", "team_size": 6, "team_level": 30,
+            "Build Team": True,
+        }
+        self._render_team_tab()
+        team = st.session_state["team_result"]
+        self.assertIn("Protagonist", [m["character"] for m in team])  # force-deployed, so on this team
+
+        if not hasattr(st, "SELECTBOX_CALLS"):
+            self.skipTest("stub-only assertion - SELECTBOX_CALLS isn't part of the real streamlit API")
+        dancer_call = next(
+            (key, options) for key, options in st.SELECTBOX_CALLS if key.startswith("team_dancer_select_")
+        )
+        _, dancer_options = dancer_call
+        self.assertNotIn("Protagonist", dancer_options)
+        self.assertIn("None", dancer_options)
+        # Every other team member IS offered.
+        for member in team:
+            if member["character"] != "Protagonist":
+                self.assertIn(member["character"], dancer_options)
+
+    def test_team_tab_assigned_dancer_is_reflected_on_their_card(self):
+        st.WIDGET_OVERRIDES = {
+            "team_route": "Blue Lions", "team_size": 6, "team_level": 30,
+            "Build Team": True,
+        }
+        self._render_team_tab()
+        team = st.session_state["team_result"]
+        non_protagonist = next(m["character"] for m in team if m["character"] != "Protagonist")
+        dancer_widget_key = "team_dancer_select_" + ",".join(sorted(m["character"] for m in team))
+
+        # Rerun without pressing Build again (same pattern as the
+        # unrelated-rerun regression test above) - persisting a team while
+        # assigning its Dancer, the way a real user would.
+        st.WIDGET_OVERRIDES = {
+            "team_route": "Blue Lions", "team_size": 6, "team_level": 30,
+            "Build Team": False, "\U0001F3B2 Different team, same pool": False,
+            dancer_widget_key: non_protagonist,
+        }
+        if hasattr(st, "CAPTION_CALLS"):
+            st.CAPTION_CALLS.clear()
+        self._render_team_tab()
+        self.assertEqual(st.session_state["team_result"], team)  # unchanged, same as the rerun-survival test
+
+        if not hasattr(st, "CAPTION_CALLS"):
+            self.skipTest("stub-only assertion - CAPTION_CALLS isn't part of the real streamlit API")
+        dancer_badges = [c for c in st.CAPTION_CALLS if "This team's Dancer" in c]
+        # Exactly one member's card shows the badge - the single roster-wide slot, not a per-member option.
+        self.assertEqual(len(dancer_badges), 1)
 
     def test_team_tab_shuffle_button(self):
         st.WIDGET_OVERRIDES = {

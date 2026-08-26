@@ -26,6 +26,7 @@ class _SessionState(dict):
 
 session_state = _SessionState()
 WIDGET_OVERRIDES = {}  # key/label -> forced return value, set by the test before calling into app.py
+PLOTLY_CALLS = []  # (key, fig) for every plotly_chart() call this run - cleared per-test, see test_app_smoke.py
 
 
 def _override(key, default):
@@ -50,8 +51,11 @@ def subheader(x):
     pass
 
 
+CAPTION_CALLS = []  # every caption() call's text this run - cleared per-test, see test_app_smoke.py
+
+
 def caption(x):
-    pass
+    CAPTION_CALLS.append(x)
 
 
 def divider():
@@ -62,8 +66,11 @@ def write(x):
     pass
 
 
+MARKDOWN_CALLS = []  # every markdown() call's raw HTML/text this run - cleared per-test, see test_app_smoke.py
+
+
 def markdown(x, **kw):
-    pass
+    MARKDOWN_CALLS.append(x)
 
 
 def info(x):
@@ -123,7 +130,11 @@ def tabs(labels):
     return [_Block() for _ in labels]
 
 
+SELECTBOX_CALLS = []  # (key or label, options list) for every selectbox() call this run - see test_app_smoke.py
+
+
 def selectbox(label, options, index=0, key=None, format_func=None, help=None):
+    SELECTBOX_CALLS.append((key or label, list(options)))
     default = options[index] if options else None
     return _override(key or label, default)
 
@@ -156,4 +167,4 @@ def rerun():
 
 
 def plotly_chart(fig, use_container_width=True, key=None):
-    pass
+    PLOTLY_CALLS.append((key, fig))

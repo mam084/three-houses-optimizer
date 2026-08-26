@@ -491,6 +491,8 @@ def build_team_with_paths(
     include_dlc_classes: bool = False,
     locked_builds: dict | None = None,
     class_growth_df: pd.DataFrame | None = None,
+    class_base_stats_df: pd.DataFrame | None = None,
+    character_relics_df: pd.DataFrame | None = None,
     force_deployed: set | None = None,
 ) -> list[dict]:
     """
@@ -499,11 +501,11 @@ def build_team_with_paths(
     output is immediately useful rather than just a role assignment.
 
     eligibility_df, character_gender_df, weapon_req_df,
-    character_weapon_talent_df, starting_level_df, include_dlc_classes and
-    class_growth_df are passed straight through to
-    recommend_for_character - see its docstring. All optional and default
-    to None/False (the corresponding feature disabled), for backward
-    compatibility with existing callers.
+    character_weapon_talent_df, starting_level_df, include_dlc_classes,
+    class_growth_df, class_base_stats_df and character_relics_df are passed
+    straight through to recommend_for_character - see its docstring. All
+    optional and default to None/False (the corresponding feature
+    disabled), for backward compatibility with existing callers.
     must_include/exclude/rng/recruitment_lookup/cross_house_names/
     force_deployed are passed straight through to build_balanced_team -
     see its docstring (and cross_house_names_in_pool for how to compute
@@ -548,7 +550,8 @@ def build_team_with_paths(
             eligibility_df=eligibility_df, character_gender_df=character_gender_df,
             weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
             starting_level_df=starting_level_df, include_dlc_classes=include_dlc_classes,
-            class_growth_df=class_growth_df,
+            class_growth_df=class_growth_df, class_base_stats_df=class_base_stats_df,
+            character_relics_df=character_relics_df,
         )
         member["path"] = full_rec["path"]
         member["final_class"] = full_rec["path"][-1]["class"] if full_rec["path"] else None
@@ -570,6 +573,8 @@ def main():
     recruitment_requirements_df = pd.read_csv(DATA_DIR / "recruitment_requirements.csv")
     starting_level_df = pd.read_csv(DATA_DIR / "character_starting_level.csv")
     class_growth_df = pd.read_csv(DATA_DIR / "class_growth_rates.csv")
+    class_base_stats_df = pd.read_csv(DATA_DIR / "class_base_stats.csv")
+    character_relics_df = pd.read_csv(DATA_DIR / "character_relics.csv")
 
     import argparse
     parser = argparse.ArgumentParser(description="Recommend a balanced Three Houses team.")
@@ -629,7 +634,9 @@ def main():
         recruitment_lookup=recruitment_lookup, cross_house_names=cross_house_names,
         weapon_req_df=weapon_req_df, character_weapon_talent_df=character_weapon_talent_df,
         starting_level_df=starting_level_df, include_dlc_classes=args.include_dlc_classes,
-        class_growth_df=class_growth_df, force_deployed=set(mandatory),
+        class_growth_df=class_growth_df, class_base_stats_df=class_base_stats_df,
+        character_relics_df=character_relics_df,
+        force_deployed=set(mandatory),
     )
 
     dlc_names = set(base_stats_df[base_stats_df["house"] == DLC_HOUSE]["name"])
