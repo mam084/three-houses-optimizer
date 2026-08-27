@@ -3,14 +3,32 @@ name: Tests
 # Round 6 action item: "Add CI (GitHub Actions running the test suite on
 # every push)". Runs the whole stdlib-unittest suite (tests/test_optimizer.py,
 # tests/test_team_builder.py, tests/test_app_smoke.py - 216 tests as of this
-# round) against real pandas/numpy/streamlit/plotly/Pillow installs, on every
-# push and pull request, across the Python versions the project has actually
-# been developed against.
+# round), on every push and pull request, across the Python versions the
+# project has actually been developed against.
 #
 # No pytest dependency is introduced here on purpose - the project uses
 # plain `unittest`, and `python -m unittest discover` is exactly what a
 # contributor runs locally (see README.md), so CI exercises the same command
 # rather than a parallel one that could drift from it.
+#
+# IMPORTANT - deliberately NOT installing streamlit/plotly for the `test`
+# job below, even though they're in requirements.txt: tests/test_app_smoke.py
+# is built to run against the bundled tests/stubs/ (streamlit.py + plotly/)
+# stand-ins, not the real packages - see that file's own docstring. The stub
+# streamlit exposes a WIDGET_OVERRIDES dict and *_CALLS capture lists
+# (SELECTBOX_CALLS, MARKDOWN_CALLS, WARNING_CALLS, PLOTLY_CALLS, ...) that
+# the smoke tests read directly to control and inspect widget behavior; the
+# real streamlit package has neither, and calling its widgets outside an
+# actual `streamlit run` script context doesn't error, it just silently
+# ignores WIDGET_OVERRIDES and always returns each widget's own default -
+# so every override-driven assertion in test_app_smoke.py fails, not from a
+# real bug, but from testing against the wrong thing. Installing real
+# streamlit/plotly here once caused exactly that: every smoke test failed
+# on every Python version in this workflow's first run, even though the
+# same suite was green locally (where streamlit/plotly were never
+# installed, so the stub was already in effect) - see the `import-check`
+# job below for how this workflow still gets real-dependency coverage
+# without breaking the stub-based smoke tests.
 
 on:
   push:
@@ -28,18 +46,42 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: "pip"
 
-      - name: Install dependencies
+      - name: Install test dependencies (NOT streamlit/plotly - see workflow comment above)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy Pillow
+
+      - name: Run test suite
+        run: python -m unittest discover -s tests -v
+
+  import-check:
+    # Separate from `test` above on purpose: this job installs the REAL
+    # requirements.txt (including streamlit/plotly) and only checks that
+    # app.py and its dependencies actually import cleanly under them - real
+    # dependency-version coverage, without running the widget-override-
+    # driven smoke tests against the wrong (real, non-stubbed) streamlit.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install real dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run test suite
-        run: python -m unittest discover -s tests -v
+      - name: Import app.py against real streamlit/plotly
+        run: python -c "import app"
