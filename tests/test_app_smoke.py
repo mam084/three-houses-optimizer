@@ -35,9 +35,17 @@ for path in (str(REPO_ROOT), str(STUBS_DIR)):
 try:
     import streamlit as st  # real install if present, else tests/stubs/streamlit.py
     import app
+    import app_state
+    from tabs import character_tab, class_explorer_tab, team_tab
+    from src.optimizer import STAT_COLS
 except Exception as exc:  # pragma: no cover - environment-dependent
     st = None
     app = None
+    app_state = None
+    character_tab = None
+    class_explorer_tab = None
+    team_tab = None
+    STAT_COLS = None
     IMPORT_ERROR = exc
 else:
     IMPORT_ERROR = None
@@ -63,12 +71,12 @@ class TestAppSmoke(unittest.TestCase):
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
             self.recruitment_requirements_df, self.starting_level_df, self.class_growth_df,
             self.class_base_stats_df, self.character_relics_df,
-        ) = app.load_data()
-        self.playable_names = app.get_playable_names(self.base_stats_df)
-        self.dlc_names = app.get_dlc_names(self.base_stats_df)
+        ) = app_state.load_data()
+        self.playable_names = app_state.get_playable_names(self.base_stats_df)
+        self.dlc_names = app_state.get_dlc_names(self.base_stats_df)
 
     def _render_character_tab(self):
-        app.render_character_tab(
+        character_tab.render_character_tab(
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
             self.starting_level_df, self.class_growth_df, self.class_base_stats_df,
@@ -76,7 +84,7 @@ class TestAppSmoke(unittest.TestCase):
         )
 
     def _render_team_tab(self):
-        app.render_team_tab(
+        team_tab.render_team_tab(
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
             self.recruitment_requirements_df, self.starting_level_df, self.class_growth_df,
@@ -90,7 +98,7 @@ class TestAppSmoke(unittest.TestCase):
     def test_character_tab_portrait_is_color_coded_by_house(self):
         # Item 8 (route-based color coding): the fallback portrait tile
         # should be tinted per the character's own house/route (see
-        # app.HOUSE_COLORS), not a single flat neutral box for everyone.
+        # app_state.HOUSE_COLORS), not a single flat neutral box for everyone.
         # PORTRAIT_DIR is swapped to an empty scratch directory for this
         # test (rather than relying on the real assets/portraits/ having
         # no file for whichever character is picked) so this test keeps
@@ -98,29 +106,29 @@ class TestAppSmoke(unittest.TestCase):
         # portrait files anyone has since added to the repo.
         if not hasattr(st, "MARKDOWN_CALLS"):
             self.skipTest("stub-only assertion - MARKDOWN_CALLS isn't part of the real streamlit API")
-        real_portrait_dir = app.PORTRAIT_DIR
+        real_portrait_dir = app_state.PORTRAIT_DIR
         with tempfile.TemporaryDirectory() as tmp_dir:
-            app.PORTRAIT_DIR = Path(tmp_dir)
+            app_state.PORTRAIT_DIR = Path(tmp_dir)
             try:
                 st.WIDGET_OVERRIDES = {"char_select": "Bernadetta"}  # Black Eagles
                 self._render_character_tab()
             finally:
-                app.PORTRAIT_DIR = real_portrait_dir
+                app_state.PORTRAIT_DIR = real_portrait_dir
         portrait_html = next(html for html in st.MARKDOWN_CALLS if "div title=" in html)
-        self.assertIn(app.HOUSE_COLORS["Black Eagles"], portrait_html)
+        self.assertIn(app_state.HOUSE_COLORS["Black Eagles"], portrait_html)
         self.assertIn("Black Eagles", portrait_html)
 
     def test_team_tab_portraits_are_color_coded_by_house(self):
         if not hasattr(st, "MARKDOWN_CALLS"):
             self.skipTest("stub-only assertion - MARKDOWN_CALLS isn't part of the real streamlit API")
-        real_portrait_dir = app.PORTRAIT_DIR
+        real_portrait_dir = app_state.PORTRAIT_DIR
         with tempfile.TemporaryDirectory() as tmp_dir:
-            app.PORTRAIT_DIR = Path(tmp_dir)
+            app_state.PORTRAIT_DIR = Path(tmp_dir)
             try:
                 st.WIDGET_OVERRIDES = {"team_route": "Blue Lions", "Build Team": True}
                 self._render_team_tab()
             finally:
-                app.PORTRAIT_DIR = real_portrait_dir
+                app_state.PORTRAIT_DIR = real_portrait_dir
         portrait_htmls = [html for html in st.MARKDOWN_CALLS if "div title=" in html]
         self.assertTrue(portrait_htmls)
         # Every team member on a Blue Lions build is either a Blue Lions
@@ -128,7 +136,7 @@ class TestAppSmoke(unittest.TestCase):
         # get_candidate_pool) - whichever house each one's tile reports,
         # it should be a real, colored house, not the neutral fallback.
         for html in portrait_htmls:
-            self.assertNotIn(app.DEFAULT_PORTRAIT_COLOR, html)
+            self.assertNotIn(app_state.DEFAULT_PORTRAIT_COLOR, html)
 
     def test_character_tab_shows_growth_rate_mini_chart_for_every_tier(self):
         # Item 8: growth-rate visualization on the Character Optimizer
@@ -148,7 +156,7 @@ class TestAppSmoke(unittest.TestCase):
         for _, fig in growth_charts:
             self.assertEqual(len(fig.traces), 1)
             trace = fig.traces[0]
-            self.assertEqual(list(trace.kwargs["y"]), app.STAT_COLS)
+            self.assertEqual(list(trace.kwargs["y"]), STAT_COLS)
             self.assertEqual(trace.kwargs["orientation"], "h")
 
     def test_character_tab_manual_role_and_mixmatch_override(self):
@@ -304,7 +312,7 @@ class TestAppSmoke(unittest.TestCase):
         # Item 9: Dancer is a single roster-wide slot, not something every
         # team member can be independently assigned - enforced here by (a)
         # the Protagonist never appearing in the option list at all (see
-        # app.DANCER_INELIGIBLE_CHARACTERS) and (b) the control being one
+        # team_tab.DANCER_INELIGIBLE_CHARACTERS) and (b) the control being one
         # selectbox (options list, index-picks-one), never a multiselect.
         st.WIDGET_OVERRIDES = {
             "team_route": "Blue Lions", "team_size": 6, "team_level": 30,
@@ -410,7 +418,7 @@ class TestAppSmoke(unittest.TestCase):
                 "path": [{"tier": "Beginner", "class": "Fighter", "score": 1.0, "why": "test",
                           "requirement": None, "is_unique_class": False}],
                 "final_class": "Fighter",
-                "expected_final_stats": {s: 10 for s in app.STAT_COLS},
+                "expected_final_stats": {s: 10 for s in STAT_COLS},
                 "eligible_unique_classes": [],
             }
         }
@@ -424,13 +432,13 @@ class TestAppSmoke(unittest.TestCase):
         self.assertEqual(members["Bernadetta"]["final_class"], "Fighter")
 
     def test_class_explorer_tab_default(self):
-        app.render_class_explorer_tab(self.stat_boosts_df, self.weapon_req_df, self.class_growth_df)
+        class_explorer_tab.render_class_explorer_tab(self.stat_boosts_df, self.weapon_req_df, self.class_growth_df)
 
     def test_class_explorer_tab_compare_two_classes(self):
         st.WIDGET_OVERRIDES = {
             "explorer_class_a": "Gremory", "explorer_class_b": "Bishop", "explorer_include_dlc": True,
         }
-        app.render_class_explorer_tab(self.stat_boosts_df, self.weapon_req_df, self.class_growth_df)
+        class_explorer_tab.render_class_explorer_tab(self.stat_boosts_df, self.weapon_req_df, self.class_growth_df)
 
 
 @unittest.skipIf(app is None, f"could not import app.py / streamlit: {IMPORT_ERROR}")
@@ -438,64 +446,64 @@ class TestBylethPortraitGender(unittest.TestCase):
     """
     Byleth (the Protagonist)'s in-game portrait is a player choice, not a
     fixed trait the way it is for every other character - see
-    app.BYLETH_PORTRAIT_SLUGS and get_portrait_path's docstring. These
+    app_state.BYLETH_PORTRAIT_SLUGS and get_portrait_path's docstring. These
     exercise get_portrait_path directly against a scratch assets/portraits/
-    directory (swapped in for app.PORTRAIT_DIR and restored afterward),
+    directory (swapped in for app_state.PORTRAIT_DIR and restored afterward),
     since portrait file resolution doesn't depend on any character/class
-    data - no need for the full app.load_data() setup TestAppSmoke uses.
+    data - no need for the full app_state.load_data() setup TestAppSmoke uses.
     """
 
     def setUp(self):
-        self._real_portrait_dir = app.PORTRAIT_DIR
+        self._real_portrait_dir = app_state.PORTRAIT_DIR
         self._tmp_dir = tempfile.TemporaryDirectory()
-        app.PORTRAIT_DIR = Path(self._tmp_dir.name)
+        app_state.PORTRAIT_DIR = Path(self._tmp_dir.name)
 
     def tearDown(self):
-        app.PORTRAIT_DIR = self._real_portrait_dir
+        app_state.PORTRAIT_DIR = self._real_portrait_dir
         self._tmp_dir.cleanup()
 
     def _touch(self, filename):
-        (app.PORTRAIT_DIR / filename).write_bytes(b"")
+        (app_state.PORTRAIT_DIR / filename).write_bytes(b"")
 
     def test_resolves_byleth_m_for_male(self):
         self._touch("byleth_m.png")
         self._touch("byleth_f.png")
-        self.assertEqual(app.get_portrait_path("Protagonist", byleth_gender="Male").name, "byleth_m.png")
+        self.assertEqual(app_state.get_portrait_path("Protagonist", byleth_gender="Male").name, "byleth_m.png")
 
     def test_resolves_byleth_f_for_female(self):
         self._touch("byleth_m.png")
         self._touch("byleth_f.png")
-        self.assertEqual(app.get_portrait_path("Protagonist", byleth_gender="Female").name, "byleth_f.png")
+        self.assertEqual(app_state.get_portrait_path("Protagonist", byleth_gender="Female").name, "byleth_f.png")
 
     def test_defaults_to_male_when_gender_omitted(self):
         self._touch("byleth_m.png")
         self._touch("byleth_f.png")
-        self.assertEqual(app.get_portrait_path("Protagonist").name, "byleth_m.png")
+        self.assertEqual(app_state.get_portrait_path("Protagonist").name, "byleth_m.png")
 
     def test_falls_back_to_plain_protagonist_file(self):
         # No gender-specific files at all - someone who added one image before this
         # distinction existed, or who doesn't want to split it, should still see it.
         self._touch("protagonist.png")
-        self.assertEqual(app.get_portrait_path("Protagonist", byleth_gender="Female").name, "protagonist.png")
+        self.assertEqual(app_state.get_portrait_path("Protagonist", byleth_gender="Female").name, "protagonist.png")
 
     def test_gender_specific_file_wins_over_plain_protagonist_file(self):
         self._touch("protagonist.png")
         self._touch("byleth_f.png")
-        self.assertEqual(app.get_portrait_path("Protagonist", byleth_gender="Female").name, "byleth_f.png")
+        self.assertEqual(app_state.get_portrait_path("Protagonist", byleth_gender="Female").name, "byleth_f.png")
 
     def test_missing_gender_file_falls_back_without_showing_the_wrong_gender(self):
         # Only byleth_m.png exists; asking for Female should land on the plain
         # protagonist.png fallback, never on byleth_m.png (the wrong gender).
         self._touch("byleth_m.png")
         self._touch("protagonist.png")
-        self.assertEqual(app.get_portrait_path("Protagonist", byleth_gender="Female").name, "protagonist.png")
+        self.assertEqual(app_state.get_portrait_path("Protagonist", byleth_gender="Female").name, "protagonist.png")
 
     def test_byleth_gender_is_ignored_for_every_other_character(self):
         self._touch("edelgard.png")
-        self.assertEqual(app.get_portrait_path("Edelgard", byleth_gender="Female").name, "edelgard.png")
+        self.assertEqual(app_state.get_portrait_path("Edelgard", byleth_gender="Female").name, "edelgard.png")
 
     def test_no_file_at_all_returns_none(self):
-        self.assertIsNone(app.get_portrait_path("Protagonist", byleth_gender="Male"))
+        self.assertIsNone(app_state.get_portrait_path("Protagonist", byleth_gender="Male"))
 
 
 @unittest.skipIf(app is None, f"could not import app.py / streamlit: {IMPORT_ERROR}")
@@ -533,18 +541,18 @@ class TestBylethPortraitGenderThroughRenderFunctions(unittest.TestCase):
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
             self.recruitment_requirements_df, self.starting_level_df, self.class_growth_df,
             self.class_base_stats_df, self.character_relics_df,
-        ) = app.load_data()
-        self.playable_names = app.get_playable_names(self.base_stats_df)
-        self.dlc_names = app.get_dlc_names(self.base_stats_df)
+        ) = app_state.load_data()
+        self.playable_names = app_state.get_playable_names(self.base_stats_df)
+        self.dlc_names = app_state.get_dlc_names(self.base_stats_df)
 
-        self._real_portrait_dir = app.PORTRAIT_DIR
+        self._real_portrait_dir = app_state.PORTRAIT_DIR
         self._tmp_dir = tempfile.TemporaryDirectory()
-        app.PORTRAIT_DIR = Path(self._tmp_dir.name)
-        self._write_minimal_png(app.PORTRAIT_DIR / "byleth_m.png")
-        self._write_minimal_png(app.PORTRAIT_DIR / "byleth_f.png")
+        app_state.PORTRAIT_DIR = Path(self._tmp_dir.name)
+        self._write_minimal_png(app_state.PORTRAIT_DIR / "byleth_m.png")
+        self._write_minimal_png(app_state.PORTRAIT_DIR / "byleth_f.png")
 
     def tearDown(self):
-        app.PORTRAIT_DIR = self._real_portrait_dir
+        app_state.PORTRAIT_DIR = self._real_portrait_dir
         self._tmp_dir.cleanup()
 
     @staticmethod
@@ -564,7 +572,7 @@ class TestBylethPortraitGenderThroughRenderFunctions(unittest.TestCase):
         except ImportError:
             self.skipTest("Pillow isn't installed - portrait decoding always falls back to the color tile")
         st.WIDGET_OVERRIDES = {"char_select": "Protagonist"}
-        app.render_character_tab(
+        character_tab.render_character_tab(
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
             self.starting_level_df, self.class_growth_df, self.class_base_stats_df,
@@ -584,7 +592,7 @@ class TestBylethPortraitGenderThroughRenderFunctions(unittest.TestCase):
         st.WIDGET_OVERRIDES = {
             "team_route": "Golden Deer", "team_size": 4, "team_level": 30, "Build Team": True,
         }
-        app.render_team_tab(
+        team_tab.render_team_tab(
             self.base_stats_df, self.growth_rates_df, self.stat_boosts_df, self.eligibility_df,
             self.character_gender_df, self.weapon_req_df, self.character_weapon_talent_df,
             self.recruitment_requirements_df, self.starting_level_df, self.class_growth_df,
