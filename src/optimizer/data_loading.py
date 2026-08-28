@@ -91,6 +91,65 @@ def load_class_growth_lookup(class_growth_df: pd.DataFrame | None) -> dict:
 
 
 
+def class_growth_axis_range(class_growth_lookup: dict) -> tuple[float, float]:
+    """
+    Global (min, max) across every class's own growth-rate modifier, for
+    every stat - the one fixed range every STANDALONE growth-rate chart
+    (a single class, or two classes side by side in the Class Explorer -
+    never stacked with a character's own growth, see
+    growth_stack_axis_range for that) should share.
+
+    Without this, each chart auto-scaled to whatever class(es) happened
+    to be on screen, so a modest +15% modifier could render just as tall
+    as another class's +40% simply because the two were never shown next
+    to each other - misleading in exactly the way a shared axis fixes: a
+    bar's height means the same thing everywhere it appears.
+
+    Returns (-1.0, 1.0) if class_growth_lookup is empty, so callers never
+    divide by (or plot against) a zero-width range.
+    """
+    values = [v for mods in class_growth_lookup.values() for v in mods.values()]
+    if not values:
+        return (-1.0, 1.0)
+    return (float(min(values)), float(max(values)))
+
+
+
+def growth_stack_axis_range(class_growth_lookup: dict, growth_rates_df: pd.DataFrame | None) -> tuple[float, float]:
+    """
+    Global (min, max) for the STACKED growth chart only (a character's own
+    per-stat growth rate plus one class's own growth-rate modifier, summed
+    - see render_growth_stack_chart) - deliberately a SEPARATE range from
+    class_growth_axis_range's standalone one. A stacked total can run
+    well above any single class's own modifier (a character's own growth
+    rate alone is usually 10-70%), so sharing one axis across both chart
+    types would needlessly compress the standalone charts to make room
+    for totals they never actually show.
+
+    Bounded by the real worst case across the whole roster and class
+    list - the single highest and lowest per-stat growth rate anywhere in
+    growth_rates_df, plus the single highest and lowest per-stat modifier
+    anywhere in class_growth_lookup - so a stacked bar can never exceed
+    what this range shows, no matter which character/class/stat is being
+    displayed.
+
+    Returns (-1.0, 1.0) if either input has no usable data.
+    """
+    class_values = [v for mods in class_growth_lookup.values() for v in mods.values()]
+    if growth_rates_df is None or growth_rates_df.empty or not class_values:
+        return (-1.0, 1.0)
+    stat_cols_present = [c for c in STAT_COLS if c in growth_rates_df.columns]
+    if not stat_cols_present:
+        return (-1.0, 1.0)
+    char_values = growth_rates_df[stat_cols_present].to_numpy().flatten()
+    if len(char_values) == 0:
+        return (-1.0, 1.0)
+    stack_min = float(char_values.min()) + float(min(class_values))
+    stack_max = float(char_values.max()) + float(max(class_values))
+    return (stack_min, stack_max)
+
+
+
 def load_class_base_stats_lookup(class_base_stats_df: pd.DataFrame | None) -> dict:
     """
     Index data/class_base_stats.csv by class name -> {stat: value} - each

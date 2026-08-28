@@ -15,9 +15,12 @@ import streamlit as st
 from src.optimizer import (
     ROLE_PROFILES,
     STAT_COLS,
+    WEAPON_SWITCH_WARNING_ENABLED,
+    class_growth_axis_range,
     compute_roster_stat_stats,
     format_combined_requirements,
     format_requirement,
+    growth_stack_axis_range,
     list_eligible_classes_at_tier,
     load_character_proficiency_lookup,
     load_character_relic_lookup,
@@ -46,7 +49,7 @@ from app_state import (
 
 
 
-def render_growth_rate_mini_chart(class_name: str, class_growth_lookup: dict, key: str) -> bool:
+def render_growth_rate_mini_chart(class_name: str, class_growth_lookup: dict, key: str, axis_range: tuple[float, float]) -> bool:
     """
     Compact per-stat growth-RATE modifier chart for one class (see
     optimizer.load_class_growth_lookup) - all of STAT_COLS at a glance, as
@@ -66,6 +69,14 @@ def render_growth_rate_mini_chart(class_name: str, class_growth_lookup: dict, ke
     Armored classes trading away Spd) so a negative modifier reads as a
     real cost, not just a smaller bar.
 
+    axis_range is the caller-supplied (min, max) from
+    optimizer.class_growth_axis_range - a single global range shared by
+    EVERY standalone growth-rate chart in the app (this one, and the Class
+    Explorer's), so a bar's height means the same thing no matter which
+    class or tier is being shown, rather than each chart auto-scaling to
+    its own selection and silently making a middling modifier look as
+    tall as a dramatically better/worse one elsewhere.
+
     Returns whether a chart was actually drawn - False (with a fallback
     caption, matching the Class Explorer tab's own wording) if class_name
     has no growth-rate data on file, so callers can render nothing further
@@ -83,11 +94,17 @@ def render_growth_rate_mini_chart(class_name: str, class_growth_lookup: dict, ke
         x=values, y=STAT_COLS, orientation="h", marker_color=colors,
         text=[f"{v:+g}%" for v in values], textposition="outside",
     ))
-    max_abs = max((abs(v) for v in values), default=1) or 1
+    axis_min, axis_max = axis_range
+    # A little headroom beyond the exact global min/max so the outside
+    # text labels (textposition="outside") never get clipped at the
+    # chart's own edge - same fixed padding on every chart, so it doesn't
+    # reintroduce the per-chart inconsistency this range is meant to fix.
+    span = max(axis_max - axis_min, 1.0)
+    padding = span * 0.15
     fig.update_layout(
         height=260,
         margin=dict(l=0, r=10, t=10, b=10),
-        xaxis=dict(title=None, range=[-max_abs * 1.5, max_abs * 1.5], zeroline=True),
+        xaxis=dict(title=None, range=[axis_min - padding, axis_max + padding], zeroline=True),
         yaxis=dict(autorange="reversed"),  # HP (STAT_COLS[0]) on top, reading order
         showlegend=False,
     )
@@ -106,6 +123,7 @@ def render_path_with_mixmatch(
     role_used: str,
     weapon_req_lookup: dict,
     class_growth_lookup: dict,
+    growth_axis_range: tuple[float, float],
     include_dlc_classes: bool = False,
 ) -> list[str]:
     """
@@ -179,8 +197,9 @@ def render_path_with_mixmatch(
                 with st.expander("Growth-rate modifiers"):
                     render_growth_rate_mini_chart(
                         choice, class_growth_lookup, key=f"growth_mini_{character}_{role_used}_{step['tier']}",
+                        axis_range=growth_axis_range,
                     )
-                if step.get("weapon_switch_warning"):
+                if WEAPON_SWITCH_WARNING_ENABLED and step.get("weapon_switch_warning"):
                     st.warning("Requires a weapon type never trained so far - a slow switch in practice.")
                 st.caption(step["why"])
             else:
@@ -199,6 +218,7 @@ def render_path_with_mixmatch(
                 with st.expander("Growth-rate modifiers"):
                     render_growth_rate_mini_chart(
                         choice, class_growth_lookup, key=f"growth_mini_{character}_{role_used}_{step['tier']}",
+                        axis_range=growth_axis_range,
                     )
     return selected
 
@@ -330,7 +350,10 @@ def render_role_fit_chart(role_scores: dict, used_role: str, key: str):
 
 
 
-def render_growth_stack_chart(character: str, growth_row: pd.Series, selected_steps: list[dict], class_growth_lookup: dict):
+def render_growth_stack_chart(
+    character: str, growth_row: pd.Series, selected_steps: list[dict], class_growth_lookup: dict,
+    stack_axis_range: tuple[float, float],
+):
     """
     Stacked bar chart of a character's own growth rate plus ONE tier's
     class growth-rate modifier (per stat), with a control to pick which
@@ -340,6 +363,17 @@ def render_growth_stack_chart(character: str, growth_row: pd.Series, selected_st
     the path you want displayed." Defaults to the deepest/final tier,
     since that's the class actually driving the projected-stats chart
     above, but every tier in the path is selectable.
+
+    stack_axis_range is the caller-supplied (min, max) from
+    optimizer.growth_stack_axis_range - fixed across every character/tier
+    this chart is ever shown for, so a stacked total's height is always
+    comparable (e.g. a stat that's already near its practical ceiling
+    under one class never LOOKS shorter than a genuinely smaller total
+    for a different class/tier just because each chart auto-scaled to its
+    own numbers). Deliberately a different, wider range than the
+    standalone growth-rate charts (class_growth_axis_range) - see
+    growth_stack_axis_range's own docstring for why the two shouldn't
+    share one scale.
     """
     if not selected_steps:
         return
@@ -355,6 +389,10 @@ def render_growth_stack_chart(character: str, growth_row: pd.Series, selected_st
     character_values = [float(growth_row[s]) for s in STAT_COLS]
     class_values = [class_mods.get(s, 0) for s in STAT_COLS]
 
+    axis_min, axis_max = stack_axis_range
+    span = max(axis_max - axis_min, 1.0)
+    padding = span * 0.1
+
     fig = go.Figure()
     fig.add_trace(go.Bar(x=STAT_COLS, y=character_values, name=f"{character}'s own growth"))
     fig.add_trace(go.Bar(x=STAT_COLS, y=class_values, name=f"{chosen_step['class']} modifier"))
@@ -363,6 +401,7 @@ def render_growth_stack_chart(character: str, growth_row: pd.Series, selected_st
         height=380,
         margin=dict(l=0, r=0, t=40, b=0),
         yaxis_title="Growth rate (% per level-up)",
+        yaxis=dict(range=[axis_min - padding, axis_max + padding]),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     st.plotly_chart(fig, use_container_width=True, key=f"growth_stack_{character}_{chosen_step['tier']}")
@@ -435,6 +474,8 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
         character_gender_override=character_gender if character == "Protagonist" else None,
     )
     class_growth_lookup = load_class_growth_lookup(class_growth_df)
+    growth_axis_range = class_growth_axis_range(class_growth_lookup)
+    growth_stack_range = growth_stack_axis_range(class_growth_lookup, growth_rates_df)
     class_base_stats_lookup = load_class_base_stats_lookup(class_base_stats_df)
     character_proficiency = load_character_proficiency_lookup(character_weapon_talent_df).get(character)
     character_relic_weapon_types = load_character_relic_lookup(character_relics_df).get(character)
@@ -491,7 +532,7 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
     selected_path = render_path_with_mixmatch(
         result["path"], character, stat_boosts_df, eligibility_lookup, character_gender,
         role_weights, result["role_used"], weapon_req_lookup, class_growth_lookup,
-        include_dlc_classes=include_dlc_classes,
+        growth_axis_range, include_dlc_classes=include_dlc_classes,
     )
     final_class = selected_path[-1]
 
@@ -513,7 +554,7 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
     combined_switch_warning = path_weapon_switch_warning(
         character, selected_steps, weapon_req_lookup, character_proficiency,
     )
-    if combined_switch_warning:
+    if WEAPON_SWITCH_WARNING_ENABLED and combined_switch_warning:
         st.warning(combined_switch_warning)
 
     combined_requirement = format_combined_requirements(
@@ -535,7 +576,7 @@ def render_character_tab(base_stats_df, growth_rates_df, stat_boosts_df, eligibi
         base_level_label=base_level_label,
     )
 
-    render_growth_stack_chart(character, growth_row, selected_steps, class_growth_lookup)
+    render_growth_stack_chart(character, growth_row, selected_steps, class_growth_lookup, growth_stack_range)
 
     st.button(
         "📥 Import this build into Team Builder", key=f"import_{character}",

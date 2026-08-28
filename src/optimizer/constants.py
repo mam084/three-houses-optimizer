@@ -196,6 +196,17 @@ GROWTH_RATE_SCORE_WEIGHT = 0.05
 WEAPON_SWITCH_PENALTY = 0.6
 
 
+# Temporarily hides the weapon-switch warning banner/caption in the UI
+# (Character Optimizer's per-tier and combined-path warnings, Team
+# Builder's per-member caption - see tabs/character_tab.py and
+# tabs/team_tab.py) without touching the underlying detection logic at
+# all: weapon_switch_penalty's score penalty, path_weapon_switch_warning's
+# combined-path recomputation, and every test covering both stay exactly
+# as they are. Flip this back to True to restore the warning everywhere
+# it used to show, with zero other code changes needed.
+WEAPON_SWITCH_WARNING_ENABLED = False
+
+
 # Mount and heavy-armor training are more forgiving than a standard weapon-
 # type switch (e.g. Sword -> Axe) - in practice a character who's ridden
 # ANY mount (Cavalier's Riding, Pegasus Knight's Flying, an early Armored

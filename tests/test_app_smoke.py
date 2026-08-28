@@ -25,6 +25,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STUBS_DIR = Path(__file__).resolve().parent / "stubs"
@@ -243,6 +244,25 @@ class TestAppSmoke(unittest.TestCase):
         self.assertEqual(beginner_step["requirement"], "Axe D or Bow D or Brawling D")
         self.assertFalse(beginner_step["is_unique_class"])
 
+    def test_character_tab_weapon_switch_warning_hidden_by_default(self):
+        # WEAPON_SWITCH_WARNING_ENABLED defaults to False (see
+        # src/optimizer/constants.py) - the underlying detection still
+        # runs (weapon_switch_penalty still affects scoring), but neither
+        # the per-tier nor the combined-path warning should render
+        # anywhere, even for a case that would clearly trigger it
+        # (Catherine's Fighter step below).
+        if not hasattr(st, "WARNING_CALLS"):
+            self.skipTest("stub-only assertion - WARNING_CALLS isn't part of the real streamlit API")
+
+        st.WIDGET_OVERRIDES = {
+            "char_select": "Catherine", "char_role_select": "Physical Attacker", "char_level": 5,
+        }
+        self._render_character_tab()
+        self.assertFalse(
+            any("never trained" in w for w in st.WARNING_CALLS),
+            f"weapon-switch warning rendered despite WEAPON_SWITCH_WARNING_ENABLED=False: {st.WARNING_CALLS}",
+        )
+
     def test_character_tab_weapon_switch_warning_clears_after_mixmatch_override(self):
         # Regression test for "the overall warning stays displayed even after
         # changing the class removes the underlying issue" - see
@@ -253,29 +273,36 @@ class TestAppSmoke(unittest.TestCase):
         # to Myrmidon (her trained weapon type) must clear the warning
         # entirely - the banner has to follow the actual selected path, not
         # the tool's original recommendation.
+        #
+        # WEAPON_SWITCH_WARNING_ENABLED is temporarily forced True here
+        # since this test is specifically about the underlying "does the
+        # banner track the actual selection" behavior, not about whether
+        # the banner is shown at all by default (see the
+        # ..._hidden_by_default test above for that).
         if not hasattr(st, "WARNING_CALLS"):
             self.skipTest("stub-only assertion - WARNING_CALLS isn't part of the real streamlit API")
 
-        st.WIDGET_OVERRIDES = {
-            "char_select": "Catherine", "char_role_select": "Physical Attacker", "char_level": 5,
-        }
-        self._render_character_tab()
-        self.assertTrue(
-            any("Fighter" in w and "never trained" in w for w in st.WARNING_CALLS),
-            f"expected a Fighter weapon-switch warning, got {st.WARNING_CALLS}",
-        )
+        with mock.patch.object(character_tab, "WEAPON_SWITCH_WARNING_ENABLED", True):
+            st.WIDGET_OVERRIDES = {
+                "char_select": "Catherine", "char_role_select": "Physical Attacker", "char_level": 5,
+            }
+            self._render_character_tab()
+            self.assertTrue(
+                any("Fighter" in w and "never trained" in w for w in st.WARNING_CALLS),
+                f"expected a Fighter weapon-switch warning, got {st.WARNING_CALLS}",
+            )
 
-        st.session_state.clear()
-        st.WARNING_CALLS.clear()
-        st.WIDGET_OVERRIDES = {
-            "char_select": "Catherine", "char_role_select": "Physical Attacker", "char_level": 5,
-            "mixmatch_Catherine_Physical Attacker_Beginner": "Myrmidon",
-        }
-        self._render_character_tab()
-        self.assertFalse(
-            any("never trained" in w for w in st.WARNING_CALLS),
-            f"stale weapon-switch warning survived the override: {st.WARNING_CALLS}",
-        )
+            st.session_state.clear()
+            st.WARNING_CALLS.clear()
+            st.WIDGET_OVERRIDES = {
+                "char_select": "Catherine", "char_role_select": "Physical Attacker", "char_level": 5,
+                "mixmatch_Catherine_Physical Attacker_Beginner": "Myrmidon",
+            }
+            self._render_character_tab()
+            self.assertFalse(
+                any("never trained" in w for w in st.WARNING_CALLS),
+                f"stale weapon-switch warning survived the override: {st.WARNING_CALLS}",
+            )
 
     def test_team_tab_build_then_survives_unrelated_rerun(self):
         st.WIDGET_OVERRIDES = {

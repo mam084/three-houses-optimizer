@@ -62,10 +62,13 @@ from .constants import (
     UNIQUE_STORY_CLASS_TIER,
     WEAPON_PROFICIENCY_BONUS,
     WEAPON_SWITCH_PENALTY,
+    WEAPON_SWITCH_WARNING_ENABLED,
     reachable_tiers,
 )
 
 from .data_loading import (
+    class_growth_axis_range,
+    growth_stack_axis_range,
     load_character_proficiency_lookup,
     load_character_relic_lookup,
     load_class_base_stats_lookup,
@@ -156,9 +159,11 @@ __all__ = [
     "UNIQUE_STORY_CLASS_TIER",
     "WEAPON_PROFICIENCY_BONUS",
     "WEAPON_SWITCH_PENALTY",
+    "WEAPON_SWITCH_WARNING_ENABLED",
     "apply_class_base_stat_floor",
     "apply_weapon_affinity_fallback",
     "base_stats_at_join_level",
+    "class_growth_axis_range",
     "combined_requirements_for_classes",
     "compute_roster_stat_stats",
     "cosine_similarity",
@@ -170,6 +175,7 @@ __all__ = [
     "explain_pick",
     "format_combined_requirements",
     "format_requirement",
+    "growth_stack_axis_range",
     "is_class_eligible",
     "list_eligible_classes_at_tier",
     "load_character_proficiency_lookup",

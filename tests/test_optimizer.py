@@ -37,6 +37,7 @@ from src.optimizer import (
     apply_class_base_stat_floor,
     apply_weapon_affinity_fallback,
     base_stats_at_join_level,
+    class_growth_axis_range,
     combined_requirements_for_classes,
     compute_roster_stat_stats,
     detect_natural_role,
@@ -44,6 +45,7 @@ from src.optimizer import (
     expected_stats_along_path,
     format_combined_requirements,
     format_requirement,
+    growth_stack_axis_range,
     is_class_eligible,
     list_eligible_classes_at_tier,
     load_character_proficiency_lookup,
@@ -779,6 +781,67 @@ class TestClassGrowthRates(unittest.TestCase):
     def test_score_growth_for_role_ignores_unweighted_stats(self):
         growth_mod = {"Cha": 50}  # Cha isn't in any ROLE_PROFILES weight dict
         self.assertEqual(score_growth_for_role(growth_mod, ROLE_PROFILES["Tank"]), 0.0)
+
+
+class TestGrowthAxisRanges(unittest.TestCase):
+    """
+    Coverage for class_growth_axis_range/growth_stack_axis_range - the
+    "growth-rate chart axes should be consistent, not auto-scaled per
+    chart" request. Two SEPARATE ranges by design: one shared by every
+    standalone growth-rate chart (a class on its own, or two classes
+    compared), one shared by every stacked chart (character + class
+    growth summed) - see growth_stack_axis_range's own docstring for why
+    they aren't the same range.
+    """
+
+    def test_standalone_range_covers_every_real_class_growth_value(self):
+        axis_min, axis_max = class_growth_axis_range(CLASS_GROWTH_LOOKUP)
+        all_values = [v for mods in CLASS_GROWTH_LOOKUP.values() for v in mods.values()]
+        self.assertLessEqual(axis_min, min(all_values))
+        self.assertGreaterEqual(axis_max, max(all_values))
+
+    def test_standalone_range_is_the_true_min_and_max_not_padded(self):
+        # The range itself should be the exact data bound - any display
+        # padding is the chart's own job (see render_growth_rate_mini_chart/
+        # the Class Explorer's growth tab), not baked into the shared range,
+        # so every consumer applies the same padding logic consistently.
+        axis_min, axis_max = class_growth_axis_range(CLASS_GROWTH_LOOKUP)
+        all_values = [v for mods in CLASS_GROWTH_LOOKUP.values() for v in mods.values()]
+        self.assertEqual(axis_min, min(all_values))
+        self.assertEqual(axis_max, max(all_values))
+
+    def test_standalone_range_handles_empty_lookup(self):
+        self.assertEqual(class_growth_axis_range({}), (-1.0, 1.0))
+
+    def test_stack_range_top_end_exceeds_standalone_range(self):
+        # A stacked total's upper end (character's own growth, usually
+        # 10-70%, plus a class's own positive modifier) runs well past any
+        # single class's own modifier on its own - if it didn't, the two
+        # chart types could safely share one axis after all, which would
+        # defeat the point of keeping them separate (see
+        # growth_stack_axis_range's docstring). The bottom end isn't
+        # guaranteed to be lower, since every character's own growth rate
+        # is comfortably positive (see character_growth_rates.csv) even
+        # when added to a class's most negative modifier.
+        _standalone_min, standalone_max = class_growth_axis_range(CLASS_GROWTH_LOOKUP)
+        _stack_min, stack_max = growth_stack_axis_range(CLASS_GROWTH_LOOKUP, GROWTH_RATES_DF)
+        self.assertGreater(stack_max, standalone_max)
+
+    def test_stack_range_bounds_a_real_character_class_combo(self):
+        # Pick a real character and a real class, sum their growth rates
+        # per stat, and confirm the range genuinely bounds that sum - not
+        # just a coincidentally-large number that happens to be bigger.
+        growth_row = GROWTH_RATES_DF[GROWTH_RATES_DF["name"] == "Dedue"].iloc[0]
+        class_mods = CLASS_GROWTH_LOOKUP["Warrior"]
+        stack_min, stack_max = growth_stack_axis_range(CLASS_GROWTH_LOOKUP, GROWTH_RATES_DF)
+        for stat in STAT_COLS:
+            total = float(growth_row[stat]) + class_mods.get(stat, 0)
+            self.assertGreaterEqual(total, stack_min)
+            self.assertLessEqual(total, stack_max)
+
+    def test_stack_range_handles_empty_inputs(self):
+        self.assertEqual(growth_stack_axis_range({}, GROWTH_RATES_DF), (-1.0, 1.0))
+        self.assertEqual(growth_stack_axis_range(CLASS_GROWTH_LOOKUP, None), (-1.0, 1.0))
 
 
 class TestPathLevelBands(unittest.TestCase):

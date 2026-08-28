@@ -13,6 +13,7 @@ import pandas as pd
 import streamlit as st
 
 from src.optimizer import (
+    WEAPON_SWITCH_WARNING_ENABLED,
     format_combined_requirements,
     load_weapon_requirements_lookup,
 )
@@ -107,7 +108,7 @@ def render_team(
                 ) if weapon_req_lookup else None
                 if combined_requirement:
                     st.caption("Skill ranks needed across this path: " + combined_requirement)
-                if member.get("weapon_switch_warning"):
+                if WEAPON_SWITCH_WARNING_ENABLED and member.get("weapon_switch_warning"):
                     st.caption(f"Warning: {member['weapon_switch_warning']}")
                 st.caption(f"Why on the team: {member['why']}")
 

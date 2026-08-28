@@ -14,6 +14,7 @@ from src.optimizer import (
     DLC_CLASS_TIER,
     STAT_COLS,
     TIER_ORDER,
+    class_growth_axis_range,
     format_requirement,
     load_class_growth_lookup,
     load_weapon_requirements_lookup,
@@ -100,20 +101,25 @@ def render_class_explorer_tab(stat_boosts_df: pd.DataFrame, weapon_req_df: pd.Da
         else:
             fig = go.Figure()
             fig.add_trace(go.Bar(x=STAT_COLS, y=[growth_a.get(s, 0) for s in STAT_COLS], name=class_a))
-            all_values = [growth_a.get(s, 0) for s in STAT_COLS]
             if row_b is not None:
                 growth_b = class_growth_lookup.get(class_b, {})
                 if growth_b:
                     fig.add_trace(go.Bar(x=STAT_COLS, y=[growth_b.get(s, 0) for s in STAT_COLS], name=class_b))
-                    all_values += [growth_b.get(s, 0) for s in STAT_COLS]
-            y_min = min(min(all_values), 0) * 1.2 if min(all_values) < 0 else 0
-            y_max = max(max(all_values), 1) * 1.25
+            # Global range across EVERY class's growth-rate modifier (see
+            # optimizer.class_growth_axis_range), not just whatever's
+            # currently selected here - the same range the Character
+            # Optimizer's own per-tier growth-rate mini chart uses, so a
+            # bar's height means the same thing in both places rather than
+            # each chart auto-scaling to its own pair of classes.
+            axis_min, axis_max = class_growth_axis_range(class_growth_lookup)
+            span = max(axis_max - axis_min, 1.0)
+            padding = span * 0.15
             fig.update_layout(
                 barmode="group",
                 height=420,
                 margin=dict(l=0, r=0, t=60, b=0),
                 yaxis_title="Growth-rate modifier (percentage points per level-up)",
-                yaxis=dict(range=[y_min, y_max]),
+                yaxis=dict(range=[axis_min - padding, axis_max + padding]),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
             )
             st.plotly_chart(fig, use_container_width=True, key=f"class_explorer_growth_{class_a}_{class_b}")
