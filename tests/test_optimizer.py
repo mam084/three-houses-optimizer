@@ -24,6 +24,8 @@ from src.optimizer import (
     DLC_CLASS_MERGE_TIER,
     DLC_CLASS_TIER,
     NO_CERTIFICATION_CLASSES,
+    PERSONAL_DLC_CLASS_ROLE_BONUS,
+    PERSONAL_DLC_CLASS_ROLES,
     RELIC_AFFINITY_BONUS,
     ROLE_PROFILES,
     STAT_COLS,
@@ -54,6 +56,7 @@ from src.optimizer import (
     natural_role_affinity_bonus,
     path_level_bands,
     path_weapon_switch_warning,
+    personal_dlc_class_role_bonus,
     reachable_tiers,
     recommend_for_character,
     recommend_path,
@@ -634,6 +637,116 @@ class TestDlcClasses(unittest.TestCase):
         )
         self.assertNotIn("Valkyrie", options)  # Female-locked
         self.assertIn("Trickster", options)  # unrestricted
+
+
+class TestDeathKnightEligibility(unittest.TestCase):
+    """
+    "Jeritza is the only character that can use the Death Knight class" -
+    unlike Trickster/War Monk/Cleric (unrestricted DLC Exclusive classes)
+    or Dark Flier/Valkyrie (gender-locked DLC Exclusive classes), Death
+    Knight is a DLC Exclusive class locked to exactly one character, per
+    the class_eligibility.csv row added alongside this test. Covers the
+    eligibility half of the report; TestPersonalDlcClassRoleBonus below
+    covers the "weighted slightly higher for him in physical roles" half.
+    """
+
+    def test_death_knight_eligible_for_jeritza(self):
+        self.assertTrue(is_class_eligible("Jeritza", "Death Knight", ELIGIBILITY_LOOKUP, "Male"))
+
+    def test_death_knight_not_eligible_for_other_characters(self):
+        for name, gender in (("Sylvain", "Male"), ("Dorothea", "Female"), ("Petra", "Female")):
+            with self.subTest(name=name):
+                self.assertFalse(is_class_eligible(name, "Death Knight", ELIGIBILITY_LOOKUP, gender))
+
+    def test_death_knight_absent_from_other_characters_advanced_tier_options_even_with_dlc_on(self):
+        options = list_eligible_classes_at_tier(
+            DLC_CLASS_MERGE_TIER, STAT_BOOSTS_DF,
+            character_name="Sylvain", eligibility_lookup=ELIGIBILITY_LOOKUP, character_gender="Male",
+            include_dlc_classes=True,
+        )
+        self.assertNotIn("Death Knight", options)
+
+    def test_death_knight_present_in_jeritzas_advanced_tier_options_when_dlc_on(self):
+        options = list_eligible_classes_at_tier(
+            DLC_CLASS_MERGE_TIER, STAT_BOOSTS_DF,
+            character_name="Jeritza", eligibility_lookup=ELIGIBILITY_LOOKUP, character_gender="Male",
+            include_dlc_classes=True,
+        )
+        self.assertIn("Death Knight", options)
+
+    def test_death_knight_wins_jeritzas_physical_attacker_path_at_advanced_when_dlc_on(self):
+        path = recommend_path(
+            STAT_BOOSTS_DF, "Physical Attacker", target_level=30,
+            character_name="Jeritza", eligibility_lookup=ELIGIBILITY_LOOKUP, character_gender="Male",
+            weapon_req_lookup=WEAPON_REQ_LOOKUP, class_growth_lookup=CLASS_GROWTH_LOOKUP,
+            include_dlc_classes=True,
+        )
+        advanced = next(step for step in path if step["tier"] == "Advanced")
+        self.assertEqual(advanced["class"], "Death Knight")
+
+    def test_death_knight_never_wins_a_non_jeritza_physical_attacker_path_even_with_dlc_on(self):
+        # Nobody else is eligible for it (see the eligibility tests above),
+        # so it should never show up as a *pick*, DLC opted in or not -
+        # belt-and-suspenders alongside the eligibility-list tests, at the
+        # level a user actually sees (a recommended path, not a raw option
+        # list).
+        for name, gender in (("Sylvain", "Male"), ("Dorothea", "Female")):
+            with self.subTest(name=name):
+                path = recommend_path(
+                    STAT_BOOSTS_DF, "Physical Attacker", target_level=30,
+                    character_name=name, eligibility_lookup=ELIGIBILITY_LOOKUP, character_gender=gender,
+                    weapon_req_lookup=WEAPON_REQ_LOOKUP, class_growth_lookup=CLASS_GROWTH_LOOKUP,
+                    include_dlc_classes=True,
+                )
+                picked = {step["class"] for step in path}
+                self.assertNotIn("Death Knight", picked)
+
+    def test_death_knight_has_no_certification_weapon_requirement(self):
+        # Story-unlocked, like Lord/Dancer/Noble/Commoner - not something
+        # any character (Jeritza included) certifies into via a seal exam.
+        self.assertIn("Death Knight", NO_CERTIFICATION_CLASSES)
+        self.assertIsNone(format_requirement("Death Knight", WEAPON_REQ_LOOKUP))
+
+
+class TestPersonalDlcClassRoleBonus(unittest.TestCase):
+    """
+    The "should maybe be weighted slightly higher for him in physical
+    roles" half of the Death Knight report - a small, additive nudge (see
+    PERSONAL_DLC_CLASS_ROLE_BONUS's own comment for why it's sized well
+    below UNIQUE_CLASS_SCORE_BONUS), not something that overrides a
+    genuinely better-fitting class like Fortress Knight for Tank.
+    """
+
+    def test_bonus_applies_for_jeritza_in_his_listed_roles(self):
+        for role in PERSONAL_DLC_CLASS_ROLES["Death Knight"]["roles"]:
+            with self.subTest(role=role):
+                self.assertEqual(
+                    personal_dlc_class_role_bonus("Death Knight", "Jeritza", role),
+                    PERSONAL_DLC_CLASS_ROLE_BONUS,
+                )
+
+    def test_bonus_is_zero_for_jeritza_in_an_unlisted_role(self):
+        self.assertEqual(personal_dlc_class_role_bonus("Death Knight", "Jeritza", "Magic Attacker"), 0.0)
+
+    def test_bonus_is_zero_for_any_other_character(self):
+        self.assertEqual(personal_dlc_class_role_bonus("Death Knight", "Sylvain", "Physical Attacker"), 0.0)
+
+    def test_bonus_is_zero_for_a_class_with_no_entry(self):
+        self.assertEqual(personal_dlc_class_role_bonus("Trickster", "Jeritza", "Physical Attacker"), 0.0)
+
+    def test_bonus_does_not_override_a_genuinely_better_tank(self):
+        # Fortress Knight's dedicated +10 Def boost should still win Tank
+        # for Jeritza even with Death Knight's own small bonus applied -
+        # the bonus is a tie-breaker, not a splice/override like
+        # UNIQUE_CLASS_SCORE_BONUS.
+        path = recommend_path(
+            STAT_BOOSTS_DF, "Tank", target_level=30,
+            character_name="Jeritza", eligibility_lookup=ELIGIBILITY_LOOKUP, character_gender="Male",
+            weapon_req_lookup=WEAPON_REQ_LOOKUP, class_growth_lookup=CLASS_GROWTH_LOOKUP,
+            include_dlc_classes=True,
+        )
+        advanced = next(step for step in path if step["tier"] == "Advanced")
+        self.assertEqual(advanced["class"], "Fortress Knight")
 
 
 class TestClassGrowthRates(unittest.TestCase):

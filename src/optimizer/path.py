@@ -22,6 +22,7 @@ from .constants import (
 from .eligibility import eligible_unique_story_class_by_tier, is_class_eligible
 from .requirements import (
     format_requirement,
+    personal_dlc_class_role_bonus,
     relic_affinity_bonus,
     role_compatible_with_weapon_category,
     unique_class_weapon_category,
@@ -402,6 +403,7 @@ def recommend_path(
             score -= weapon_switch_penalty(row["name"], weapon_req_lookup, accumulated_skills, character_proficiency)
             if unique_gets_bonus and row["name"] == unique_class_name:
                 score += UNIQUE_CLASS_SCORE_BONUS
+            score += personal_dlc_class_role_bonus(row["name"], character_name, role_name)
             return score
 
         scores = tier_classes.apply(score_row, axis=1)

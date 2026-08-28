@@ -12,6 +12,8 @@ import pandas as pd
 from .constants import (
     HIGH_CERTIFICATION_RANKS,
     MOUNT_ARMOR_SKILLS,
+    PERSONAL_DLC_CLASS_ROLE_BONUS,
+    PERSONAL_DLC_CLASS_ROLES,
     RANK_INDEX,
     RELIC_AFFINITY_BONUS,
     ROLE_REQUIRED_WEAPON_CATEGORY,
@@ -71,6 +73,29 @@ def relic_affinity_bonus(
         return 0.0
     required_skills = {skill for skill, _ in info["requirements"]}
     return RELIC_AFFINITY_BONUS if required_skills & character_relic_weapon_types else 0.0
+
+
+
+def personal_dlc_class_role_bonus(
+    class_name: str,
+    character_name: str | None,
+    role_name: str,
+) -> float:
+    """
+    PERSONAL_DLC_CLASS_ROLE_BONUS if class_name is a personal DLC-exclusive
+    class (see PERSONAL_DLC_CLASS_ROLES) locked to character_name, scored
+    for one of its own suited roles - else 0.0.
+
+    This is a small tie-breaking nudge, not what keeps a personal DLC class
+    off every OTHER character's recommendations - that's is_class_eligible
+    (via class_eligibility.csv), enforced upstream before a class ever
+    reaches scoring. This only matters once a class is already a
+    legitimate, eligible candidate for character_name.
+    """
+    entry = PERSONAL_DLC_CLASS_ROLES.get(class_name)
+    if entry is None or entry["character"] != character_name or role_name not in entry["roles"]:
+        return 0.0
+    return PERSONAL_DLC_CLASS_ROLE_BONUS
 
 
 

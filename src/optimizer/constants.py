@@ -95,7 +95,46 @@ UNIQUE_STORY_CLASS_TIER = {
 # load_weapon_requirements_lookup, which now filters this set out
 # regardless of what the CSV happens to contain, so a future stray row for
 # any of these eleven can't reintroduce the bug.
-NO_CERTIFICATION_CLASSES = set(UNIQUE_STORY_CLASS_TIER.keys()) | {"Lord", "Noble", "Commoner", "Dancer"}
+NO_CERTIFICATION_CLASSES = set(UNIQUE_STORY_CLASS_TIER.keys()) | {"Lord", "Noble", "Commoner", "Dancer", "Death Knight"}
+
+
+# Personal DLC-exclusive classes: locked to exactly one character in
+# class_eligibility.csv (Death Knight -> Jeritza is currently the only one -
+# Dark Flier/Valkyrie are DLC-exclusive too but only gender-locked, not
+# character-locked, so they aren't in this dict), but - unlike the
+# UNIQUE_STORY_CLASS_TIER classes above - NOT spliced into a fixed rung of
+# that character's Beginner->Master ladder, since Death Knight isn't a
+# replacement for one of Jeritza's own tiers the way Armored Lord is for
+# Edelgard's Advanced tier; it's just one candidate among the usual
+# DLC_CLASS_MERGE_TIER pool once DLC classes are opted into, competing for
+# that tier's slot on stats like any other class. Maps class_name -> the
+# one character it's locked to, and which of ROLE_PROFILES' roles that
+# class's own stat line actually reads as a fit for - Death Knight's boosts
+# (HP+5/Str+3/Def+2/Res+3, negative-leaning Spd growth) are a real, if not
+# Fortress-Knight-beating, bruiser line: "physical" in the non-magic sense
+# (Physical Attacker, Tank), not a dedicated glass-cannon striker or caster.
+# See PERSONAL_DLC_CLASS_ROLE_BONUS/personal_dlc_class_role_bonus (used by
+# recommend_path) for how this is actually scored.
+PERSONAL_DLC_CLASS_ROLES = {
+    "Death Knight": {"character": "Jeritza", "roles": {"Physical Attacker", "Tank"}},
+}
+
+# Small score bonus for a personal DLC-exclusive class (see
+# PERSONAL_DLC_CLASS_ROLES) scored for one of its own suited roles for its
+# one eligible character - the same small, additive, tie-breaking-not-
+# overriding precedent as WEAPON_PROFICIENCY_BONUS/RELIC_AFFINITY_BONUS
+# below, deliberately far short of UNIQUE_CLASS_SCORE_BONUS above: Death
+# Knight already out-scores every other Advanced-tier class on raw stats
+# alone for Physical Attacker (so this bonus is mostly insurance there), but
+# for Tank it trails Fortress Knight's dedicated +10 Def boost by a wide
+# margin that a "slight" bonus deliberately doesn't try to close - Fortress
+# Knight is a legitimately better Tank pick, DLC or not, and this constant
+# is sized to refine a close call, not force Death Knight into every
+# physical-flavored role regardless of fit. is_class_eligible (via
+# class_eligibility.csv) is what actually keeps this class off every other
+# character's list; this only matters once it's already a legitimate,
+# eligible candidate.
+PERSONAL_DLC_CLASS_ROLE_BONUS = 1.5
 
 # Flat bonus added to a spliced-in unique class's fit score (additive, not
 # a multiplier - Armored Lord's stat line, all HP/Def and a NEGATIVE Spd,
