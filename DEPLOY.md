@@ -2,7 +2,7 @@
 
 This app is deploy-ready as-is: it's a standard Streamlit app, all game
 data ships as local CSVs (no scraping or network calls at runtime), no
-secrets or API keys are needed, and the full test suite (235 tests) is
+secrets or API keys are needed, and the full test suite is
 green.
 
 ## 1. Deploy on Streamlit Community Cloud

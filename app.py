@@ -9,9 +9,7 @@ class path plus projected stats at a chosen level.
 This file is just the entry point: it loads the data once, renders the
 Byleth-gender selector shared across every tab, and dispatches to each
 tab's own render function - see app_state.py for the helpers/state shared
-across tabs, and tabs/ for each tab's actual rendering logic (round 7
-split this out of what used to be a single ~1,850-line file; see the
-round-7 project doc for the full before/after and why).
+across tabs, and tabs/ for each tab's actual rendering logic.
 
 Run with:
     streamlit run app.py

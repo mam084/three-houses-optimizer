@@ -1,34 +1,15 @@
 name: Tests
 
-# Round 6 action item: "Add CI (GitHub Actions running the test suite on
-# every push)". Runs the whole stdlib-unittest suite (tests/test_optimizer.py,
-# tests/test_team_builder.py, tests/test_app_smoke.py - 216 tests as of this
-# round), on every push and pull request, across the Python versions the
-# project has actually been developed against.
+# Runs the stdlib unittest suite on every push and pull request.
 #
-# No pytest dependency is introduced here on purpose - the project uses
-# plain `unittest`, and `python -m unittest discover` is exactly what a
-# contributor runs locally (see README.md), so CI exercises the same command
-# rather than a parallel one that could drift from it.
+# The `test` job deliberately does NOT install streamlit/plotly. The app smoke
+# tests (tests/test_app_smoke.py) run against the lightweight stand-ins in
+# tests/stubs/, which expose hooks for driving widgets and inspecting what was
+# rendered. The real packages don't have those hooks, so installing them would
+# make the smoke tests fail for reasons unrelated to the app.
 #
-# IMPORTANT - deliberately NOT installing streamlit/plotly for the `test`
-# job below, even though they're in requirements.txt: tests/test_app_smoke.py
-# is built to run against the bundled tests/stubs/ (streamlit.py + plotly/)
-# stand-ins, not the real packages - see that file's own docstring. The stub
-# streamlit exposes a WIDGET_OVERRIDES dict and *_CALLS capture lists
-# (SELECTBOX_CALLS, MARKDOWN_CALLS, WARNING_CALLS, PLOTLY_CALLS, ...) that
-# the smoke tests read directly to control and inspect widget behavior; the
-# real streamlit package has neither, and calling its widgets outside an
-# actual `streamlit run` script context doesn't error, it just silently
-# ignores WIDGET_OVERRIDES and always returns each widget's own default -
-# so every override-driven assertion in test_app_smoke.py fails, not from a
-# real bug, but from testing against the wrong thing. Installing real
-# streamlit/plotly here once caused exactly that: every smoke test failed
-# on every Python version in this workflow's first run, even though the
-# same suite was green locally (where streamlit/plotly were never
-# installed, so the stub was already in effect) - see the `import-check`
-# job below for how this workflow still gets real-dependency coverage
-# without breaking the stub-based smoke tests.
+# The `import-check` job covers the other side: it installs the real
+# requirements.txt and confirms app.py imports cleanly against it.
 
 on:
   push:
@@ -54,7 +35,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: "pip"
 
-      - name: Install test dependencies (NOT streamlit/plotly - see workflow comment above)
+      - name: Install test dependencies (stubs stand in for streamlit/plotly)
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy Pillow

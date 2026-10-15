@@ -445,54 +445,55 @@ def build_balanced_team(
     }
     role_order = sorted(role_groups.keys())
     role_cursor = {role: 0 for role in role_order}
-    role_pick_count = {role: 0 for role in role_order}
+
+    # Count roles already on the team (must-include / force-deployed members),
+    # so the rotation fills uncovered roles first. Without this, a route whose
+    # forced lord and Byleth are both Physical Attackers could add a third
+    # Physical Attacker before any Tank.
+    team_role_count = {role: 0 for role in role_order}
+    for member in team:
+        team_role_count[member["role"]] = team_role_count.get(member["role"], 0) + 1
 
     while len(team) < team_size:
-        picked_this_pass = False
-
-        for role in role_order:
-            if len(team) >= team_size:
-                break
-
-            group = role_groups[role]
-            cursor = role_cursor[role]
-            remaining = group[cursor:]
-            if not remaining:
-                continue  # this role's candidates are exhausted
-
-            if rng is not None and len(remaining) > 1:
-                choice_idx = _weighted_choice(rng, remaining)
-                candidate = remaining[choice_idx]
-                # swap the picked one to the front of the unconsumed slice
-                # so the cursor still just advances by one each time
-                group[cursor], group[cursor + choice_idx] = group[cursor + choice_idx], group[cursor]
-                candidate = group[cursor]
-                variety_note = " (weighted-random pick among remaining candidates for variety, not the single top score)"
-            else:
-                candidate = remaining[0]
-                variety_note = ""
-
-            role_cursor[role] += 1
-            role_pick_count[role] += 1
-            if rng is not None:
-                rank_note = f"Filled the {'first' if role_pick_count[role] == 1 else f'{role_pick_count[role]}{_ordinal_suffix(role_pick_count[role])}'} {role} slot"
-            else:
-                rank_note = (
-                    f"Top-scoring {role} candidate not yet on the team"
-                    if role_pick_count[role] == 1
-                    else f"{role_pick_count[role]}{_ordinal_suffix(role_pick_count[role])} {role} slot filled "
-                         f"(role rotation covers every role once before repeating one)"
-                )
-            team.append({
-                "character": candidate.character,
-                "role": candidate.role,
-                "score": round(candidate.score, 3),
-                "why": with_recruitment_note(rank_note + variety_note + ".", candidate.character),
-            })
-            picked_this_pass = True
-
-        if not picked_this_pass:
+        available_roles = [r for r in role_order if role_cursor[r] < len(role_groups[r])]
+        if not available_roles:
             break  # every role group exhausted, fewer candidates than team_size
+
+        # Least-covered role first; alphabetical order breaks ties.
+        role = min(available_roles, key=lambda r: (team_role_count[r], role_order.index(r)))
+        group = role_groups[role]
+        cursor = role_cursor[role]
+        remaining = group[cursor:]
+
+        if rng is not None and len(remaining) > 1:
+            choice_idx = _weighted_choice(rng, remaining)
+            # swap the picked one to the front of the unconsumed slice
+            # so the cursor still just advances by one each time
+            group[cursor], group[cursor + choice_idx] = group[cursor + choice_idx], group[cursor]
+            candidate = group[cursor]
+            variety_note = " (weighted-random pick among remaining candidates for variety, not the single top score)"
+        else:
+            candidate = remaining[0]
+            variety_note = ""
+
+        role_cursor[role] += 1
+        team_role_count[role] += 1
+        n = team_role_count[role]
+        if rng is not None:
+            rank_note = f"Filled the {'first' if n == 1 else f'{n}{_ordinal_suffix(n)}'} {role} slot"
+        else:
+            rank_note = (
+                f"Top-scoring {role} candidate not yet on the team"
+                if n == 1
+                else f"{n}{_ordinal_suffix(n)} {role} slot filled "
+                     f"(every role is covered once before any role repeats)"
+            )
+        team.append({
+            "character": candidate.character,
+            "role": candidate.role,
+            "score": round(candidate.score, 3),
+            "why": with_recruitment_note(rank_note + variety_note + ".", candidate.character),
+        })
 
     return team
 
