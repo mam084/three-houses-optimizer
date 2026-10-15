@@ -256,7 +256,10 @@ def main():
                 print(f"  {'':>13}     requires {step['requirement']}")
             print(f"  {'':>13}  -> {step['why']}")
         print(f"Expected stats at level {result['expected_stats_at_level']} as {result['path'][-1]['class']}:")
-        print(f"  {result['expected_final_stats']}")
+        stats_line = ", ".join(
+            f"{stat} {float(value):.1f}" for stat, value in result["expected_final_stats"].items()
+        )
+        print(f"  {stats_line}")
         if result["weapon_switch_warning"]:
             print(f"⚠ {result['weapon_switch_warning']}")
 

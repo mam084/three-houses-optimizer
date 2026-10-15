@@ -276,7 +276,7 @@ def stats_for_class_at_level(
     start_level..target_level span - a single-tier simplification, not the
     real per-tier-floor path simulation (see expected_stats_along_path /
     stats_for_selected_path, which is what the "mix and match" path
-    override in the UI actually uses as of round 5, since a real path
+    override in the UI actually uses, since a real path
     spends real levels in EARLIER tiers too, each with their own floor).
     Kept as a public, independently-testable building block and for
     single-class "what if" queries that aren't about a specific path.
@@ -320,7 +320,7 @@ def stats_for_selected_path(
     sequence of classes in selected_steps ([{"tier": ..., "class": ...},
     ...], in path order) - the real, per-tier-floor path simulation (see
     expected_stats_along_path) behind the "mix and match" override in the
-    UI, as of round 5.
+    UI.
 
     This matters, and is different from just calling stats_for_class_at_level
     on the final tier alone, because of the class base-stat floor (see
@@ -328,12 +328,10 @@ def stats_for_selected_path(
     the actually-selected path (not just the recommended one) can raise a
     stat that a later tier's growth then compounds on top of - so changing
     a non-final tier's mix-and-match dropdown can genuinely change the
-    final projected stats now, not just the path's flavor text. Before
-    round 5, only the final class's flat boost mattered for the numbers,
-    so the projected-stats chart correctly didn't need to re-render on a
-    non-final tier change; the floor mechanic is what makes every tier
-    matter (see app.py's render_character_tab, which now always calls this
-    instead of branching on "did only the final tier change").
+    final projected stats, not just the path's flavor text. The floor
+    mechanic is what makes every tier matter, which is why the Character
+    Optimizer tab always calls this rather than only recomputing when the
+    final tier changes.
 
     Returns None if character_name/growth data can't be found, or
     selected_steps is empty (nothing to project).

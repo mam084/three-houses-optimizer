@@ -1051,8 +1051,8 @@ class TestStatsForSelectedPath(unittest.TestCase):
         self.assertEqual(recomputed, result["expected_final_stats"])
 
     def test_overriding_a_non_final_tier_can_change_the_final_projection(self):
-        # Item 1 regression guard: before round 5, only the final tier's
-        # class affected the projected stats. With the per-tier floor,
+        # Regression guard: the projection once used only the final tier's
+        # class. With the per-tier floor,
         # swapping an EARLIER tier's class can change the numbers too -
         # the whole reason the projected-stats chart now needs to
         # re-render on any tier change, not just the final one.
@@ -1238,7 +1238,7 @@ class TestGrowthRateScoringDoesNotDestabilizeExistingPicks(unittest.TestCase):
 
 class TestUniqueClassRoleGate(unittest.TestCase):
     """
-    Round 6: "Dimitri/Claude's unique class gets suggested for a magic
+    Regression coverage for: "Dimitri/Claude's unique class gets suggested for a magic
     role even though it has no magic access" - see
     unique_class_weapon_category/role_compatible_with_weapon_category and
     recommend_path's unique_gets_bonus gate.
@@ -1313,7 +1313,7 @@ class TestUniqueClassRoleGate(unittest.TestCase):
 
     def test_edelgard_physical_attacker_path_still_unaffected(self):
         # Physical Attacker is exactly what Armored Lord/Emperor ARE built
-        # for - the gate should be a no-op here, same as before round 6.
+        # for - the gate should be a no-op here.
         result = recommend_for_character(
             "Edelgard", BASE_STATS_DF, GROWTH_RATES_DF, STAT_BOOSTS_DF,
             role_name="Physical Attacker", target_level=30,
@@ -1328,7 +1328,7 @@ class TestUniqueClassRoleGate(unittest.TestCase):
 
 class TestBylethGenderEligibility(unittest.TestCase):
     """
-    Round 6: "War Master is male-only, Falcon Knight is female-only, so it
+    Regression coverage for: "War Master is male-only, Falcon Knight is female-only, so it
     should depend on the gender the player picked for Byleth" - see
     recommend_for_character's character_gender_override.
     """
@@ -1398,7 +1398,7 @@ class TestBylethGenderEligibility(unittest.TestCase):
 
 class TestNaturalRoleAffinity(unittest.TestCase):
     """
-    Round 6: "how much are a character's natural proficiencies being
+    Regression coverage for: "how much are a character's natural proficiencies being
     taken into account for their default role" / "Lorenz's relic only
     supports mages, but he's still suggested as a Tank" - see
     natural_role_affinity_bonus/score_all_roles.
@@ -1474,7 +1474,7 @@ class TestNaturalRoleAffinity(unittest.TestCase):
 
 class TestCombinedPathRequirements(unittest.TestCase):
     """
-    Round 6: "final class requirement display should show the skill rank
+    Regression coverage for: "final class requirement display should show the skill rank
     needs for each class the character is going to use in the path" - see
     combined_requirements_for_classes/format_combined_requirements.
     """
@@ -1518,7 +1518,7 @@ class TestCombinedPathRequirements(unittest.TestCase):
 
 class TestPathWeaponSwitchWarning(unittest.TestCase):
     """
-    Round 6: "if a warning is displayed and I change the class so there is
+    Regression coverage for: "if a warning is displayed and I change the class so there is
     no longer a class warning, the overall warning is still displayed" -
     see path_weapon_switch_warning, which recomputes the summary from the
     ACTUAL selected path instead of reusing recommend_for_character's
@@ -1566,7 +1566,7 @@ class TestPathWeaponSwitchWarning(unittest.TestCase):
 
 class TestRoleRelevantStatDeltas(unittest.TestCase):
     """
-    Round 6: "when changing the class to a different recommended one, we
+    Regression coverage for: "when changing the class to a different recommended one, we
     should display the bonus to stats that are relevant to the currently
     selected role" - see role_relevant_stat_deltas.
     """

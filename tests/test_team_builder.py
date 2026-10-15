@@ -233,6 +233,30 @@ class TestBuildBalancedTeam(unittest.TestCase):
         team = build_balanced_team(pool, GROWTH_RATES_DF, team_size=999)
         self.assertEqual(len(team), len(pool))
 
+    def test_forced_members_count_toward_role_coverage(self):
+        # Blue Lions forces Byleth and Dimitri, both Physical Attackers. A 6-person
+        # team has room for every role once, so no role should be missing while
+        # Physical Attacker is tripled.
+        route = "Blue Lions"
+        pool = get_candidate_pool(BASE_STATS_DF, PLAYABLE_NAMES, route=route)
+        forced = mandatory_names_for_route(route)
+        team = build_balanced_team(
+            pool, GROWTH_RATES_DF, team_size=6,
+            must_include=forced, force_deployed=set(forced),
+            character_weapon_talent_df=CHARACTER_WEAPON_TALENT_DF,
+        )
+        roles = [m["role"] for m in team]
+        self.assertEqual(len(team), 6)
+        self.assertEqual(len(set(roles)), 5, f"expected all five roles covered, got {roles}")
+
+    def test_rotation_covers_every_role_before_repeating(self):
+        for route in REAL_ROUTES:
+            pool = get_candidate_pool(BASE_STATS_DF, PLAYABLE_NAMES, route=route)
+            team = build_balanced_team(pool, GROWTH_RATES_DF, team_size=5)
+            available = {m["role"] for m in build_balanced_team(pool, GROWTH_RATES_DF, team_size=len(pool))}
+            roles = [m["role"] for m in team]
+            self.assertEqual(len(set(roles)), min(5, len(available)), f"{route}: {roles}")
+
 
 class TestBuildTeamWithPaths(unittest.TestCase):
     def test_every_member_has_a_path_and_requirement_field(self):
@@ -369,7 +393,7 @@ class TestLockedBuilds(unittest.TestCase):
 
 class TestByLethGenderThreadsThroughTeamBuilder(unittest.TestCase):
     """
-    Round 6: Team Builder's own force-deployed Byleth (mandatory_names_for_route)
+    Team Builder's own force-deployed Byleth (mandatory_names_for_route)
     should be gender-locked out of War Master/Falcon Knight per the app's
     Byleth-gender selection too, not just when optimized individually on
     the Character Optimizer tab - see build_team_with_paths's byleth_gender
@@ -422,7 +446,7 @@ class TestByLethGenderThreadsThroughTeamBuilder(unittest.TestCase):
 
 class TestAssignRolesUsesProficiencyAndRelics(unittest.TestCase):
     """
-    Round 6: Team Builder's own role auto-detection (assign_roles) should
+    Team Builder's own role auto-detection (assign_roles) should
     use the same natural-role affinity nudge (proficiency + relics) the
     Character Optimizer tab does, so the two don't quietly disagree - see
     assign_roles's character_weapon_talent_df/character_relics_df params.
