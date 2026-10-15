@@ -4,6 +4,8 @@
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
+**[Try the live app →](https://three-houses-optimizer.streamlit.app)**
+
 An interactive Streamlit app for *Fire Emblem: Three Houses* that answers two questions players argue about constantly:
 
 1. **What class path should this character take?** The app detects what each character is naturally built for from their growth rates, then recommends a class at every tier (Beginner → Intermediate → Advanced → Master) and projects their stats at a target level.
@@ -40,6 +42,9 @@ Eligibility rules are enforced throughout: gender-locked and character-locked cl
 - Shareable links: the Character Optimizer's selection is stored in URL query parameters
 
 ## Quick start
+
+The app is live at **[three-houses-optimizer.streamlit.app](https://three-houses-optimizer.streamlit.app)**. To run it locally:
+
 
 ```bash
 git clone https://github.com/mam084/three-houses-optimizer.git
@@ -106,11 +111,11 @@ python -m unittest discover -s tests -v
 
 ## Roadmap
 
-- [ ] Deploy publicly on Streamlit Community Cloud (see [`DEPLOY.md`](DEPLOY.md))
+- [x] Deploy publicly: [three-houses-optimizer.streamlit.app](https://three-houses-optimizer.streamlit.app)
 - [ ] Adjustable per-stat role weights ("advanced mode")
 - [ ] Shareable Team Builder and Build Comparer links
 - [ ] Sourced join levels for late-joining characters
 
 ## Data and credits
 
-Game data from [Serenes Forest](https://serenesforest.net/three-houses/), a fan-maintained Fire Emblem reference. *Fire Emblem: Three Houses* is © Nintendo / Intelligent Systems / Koei Tecmo; this is an unofficial fan project, and no game art is bundled (see `assets/portraits/README.md` to add your own portraits).
+Game data from [Serenes Forest](https://serenesforest.net/three-houses/), a fan-maintained Fire Emblem reference. *Fire Emblem: Three Houses* is © Nintendo / Intelligent Systems / Koei Tecmo; this is an unofficial, non-commercial fan project.
