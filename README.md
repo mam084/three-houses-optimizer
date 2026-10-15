@@ -118,4 +118,4 @@ python -m unittest discover -s tests -v
 
 ## Data and credits
 
-Game data from [Serenes Forest](https://serenesforest.net/three-houses/), a fan-maintained Fire Emblem reference. *Fire Emblem: Three Houses* is © Nintendo / Intelligent Systems / Koei Tecmo; this is an unofficial, non-commercial fan project.
+Game data from [Serenes Forest](https://serenesforest.net/three-houses/), a fan-maintained Fire Emblem reference. *Fire Emblem: Three Houses* is © Nintendo / Intelligent Systems / Koei Tecmo; this is an unofficial, non-commercial fan project. Character portraits in `assets/portraits/` are official game art belonging to those rights holders and are not covered by this repository's MIT license.
